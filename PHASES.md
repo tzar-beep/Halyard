@@ -1,4 +1,4 @@
-﻿# Build Your Own Redis â€” Phased Plan (Go)
+# Build Your Own Redis â€” Phased Plan (Go)
 
 Goal: a Redis-compatible key-value server in Go that speaks RESP2 over TCP, works with `redis-cli`, and supports TTL, AOF + snapshot persistence and leader-follower replication. It should be benchmarked against real Redis and fault-tested.
 Pace: about 2â€“3 h/day, ~14 weeks. Each phase must compile, pass its tests and be committed before the next phase starts.

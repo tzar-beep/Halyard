@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis: # reference implementation for the differential test
+        image: redis:7
+        ports: ["6400:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go build ./...
+      - name: tests (race detector)
+        run: go test -race -short -count=1 ./...
+      - name: differential test against Redis 7
+        env:
+          REDIS_ADDR: 127.0.0.1:6400
+          DIFF_SEEDS: "50"
+        run: go test -count=1 ./tests/differential
+      - name: docker image
+        run: docker build -t redis-raft .

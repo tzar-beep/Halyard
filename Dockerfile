@@ -9,5 +9,5 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /server /server
 COPY --from=build --chown=nonroot:nonroot /data /data
 VOLUME /data
-EXPOSE 6379
+EXPOSE 6379 7000 8080
 ENTRYPOINT ["/server", "-addr", "0.0.0.0:6379", "-dir", "/data"]

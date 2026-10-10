@@ -243,6 +243,9 @@ func (s *Server) apiStatus(w http.ResponseWriter, _ *http.Request) {
 	for _, g := range s.raftGroups() {
 		st := g.node.CurrentStatus()
 		out["id"] = st.ID
+		if a := st.Peers[st.ID].ClientAddr; a != "" {
+			out["addr"] = a // the advertised address, as used in MOVED replies
+		}
 		groups = append(groups, groupStatus{g.id, st.State.String(), st.Term, uint64(st.Leader),
 			st.Peers[st.Leader].ClientAddr, st.Commit, st.Applied, len(st.Voters)})
 	}

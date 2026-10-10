@@ -1,0 +1,14 @@
+# Caddy terminates HTTPS (automatic Let's Encrypt certificates) and proxies each
+# node's HTTP API, so the Vercel-hosted demo (an https page) can call it.
+# Replace demo.example.com with a DNS name pointing at this VM.
+demo.example.com {
+	handle_path /n1/* {
+		reverse_proxy n1:8080
+	}
+	handle_path /n2/* {
+		reverse_proxy n2:8080
+	}
+	handle_path /n3/* {
+		reverse_proxy n3:8080
+	}
+}

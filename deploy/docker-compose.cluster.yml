@@ -1,0 +1,35 @@
+# A 3-node Raft cluster with the web demo API, for local use:
+#
+#   docker compose -f deploy/docker-compose.cluster.yml up -d --build
+#   redis-cli -c -p 6381 SET hello world        # any node; -c follows MOVED
+#   open web/index.html                          # cluster view + "kill the leader"
+#
+# Add `--shards 3` to every command to shard the keyspace over 3 Raft groups.
+x-node: &node
+  build: ..
+  restart: unless-stopped
+  environment:
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+x-cluster: &cluster "1=n1:7000/localhost:6381,2=n2:7000/localhost:6382,3=n3:7000/localhost:6383"
+
+services:
+  n1:
+    <<: *node
+    command: ["-id", "1", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "*"]
+    ports: ["6381:6379", "8081:8080"]
+    volumes: ["n1:/data"]
+  n2:
+    <<: *node
+    command: ["-id", "2", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "*"]
+    ports: ["6382:6379", "8082:8080"]
+    volumes: ["n2:/data"]
+  n3:
+    <<: *node
+    command: ["-id", "3", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "*"]
+    ports: ["6383:6379", "8083:8080"]
+    volumes: ["n3:/data"]
+
+volumes:
+  n1:
+  n2:
+  n3:

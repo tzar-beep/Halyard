@@ -1,0 +1,39 @@
+# Production-style deployment on one Oracle Cloud Always Free VM (Ampere A1,
+# up to 4 OCPU / 24 GB): three nodes in separate containers with separate volumes,
+# plus Caddy for HTTPS. See deploy/oracle/README.md.
+x-node: &node
+  build: ../..
+  restart: unless-stopped
+  environment:
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in deploy/oracle/.env}
+x-cluster: &cluster "1=n1:7000/${PUBLIC_HOST:?set PUBLIC_HOST}:6381,2=n2:7000/${PUBLIC_HOST}:6382,3=n3:7000/${PUBLIC_HOST}:6383"
+
+services:
+  n1:
+    <<: *node
+    command: ["-id", "1", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "${DEMO_ORIGIN:-*}"]
+    ports: ["6381:6379"]
+    volumes: ["n1:/data"]
+  n2:
+    <<: *node
+    command: ["-id", "2", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "${DEMO_ORIGIN:-*}"]
+    ports: ["6382:6379"]
+    volumes: ["n2:/data"]
+  n3:
+    <<: *node
+    command: ["-id", "3", "-cluster", *cluster, "-http", ":8080", "-demo", "-cors", "${DEMO_ORIGIN:-*}"]
+    ports: ["6383:6379"]
+    volumes: ["n3:/data"]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes:
+  n1:
+  n2:
+  n3:
+  caddy_data:

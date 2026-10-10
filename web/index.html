@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Raft Redis Live</title>
+  <meta name="description" content="A Redis-compatible database written from scratch in Go, replicated with Raft. Kill the leader and watch it fail over.">
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Raft Redis <span class="tag">live</span></h1>
+      <p class="lede">A Redis-compatible key-value store written from scratch in Go: RESP protocol, AOF + snapshots,
+        Raft consensus, sharding, and linearizability-checked fault tolerance. Below is a real 3-node cluster.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section>
+      <div class="section-head">
+        <h2>Cluster</h2>
+        <div class="actions">
+          <button id="kill" class="danger" disabled>Kill the leader</button>
+          <span id="failover" class="muted"></span>
+        </div>
+      </div>
+      <div id="nodes" class="nodes"></div>
+    </section>
+
+    <section class="split">
+      <div>
+        <h2>Console</h2>
+        <div class="term" id="term" aria-live="polite"></div>
+        <form id="form" autocomplete="off">
+          <span class="prompt">redis&gt;</span>
+          <input id="input" spellcheck="false" placeholder="SET greeting hello" aria-label="Command">
+        </form>
+        <p class="muted small">Try <code>SET k v</code>, <code>INCR hits</code>, <code>ZADD board 10 alice</code>,
+          <code>ZRANGE board 0 -1 WITHSCORES</code>, <code>INFO replication</code>. Commands go to the current leader.</p>
+      </div>
+      <div>
+        <h2>Event log</h2>
+        <ol id="events" class="events"></ol>
+      </div>
+    </section>
+
+    <section class="facts">
+      <div><b>~400 ms</b><span>failover after a leader dies</span></div>
+      <div><b>0</b><span>acknowledged writes lost in leader-kill tests</span></div>
+      <div><b>400k</b><span>random commands byte-identical to Redis 7</span></div>
+      <div><b>2,000+</b><span>simulated chaos seeds per Raft test run</span></div>
+    </section>
+  </main>
+
+  <footer class="wrap muted small">
+    Built in Go with no dependencies. Writes are committed by a Raft majority before acknowledgement;
+    reads use ReadIndex, so they are linearizable.
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

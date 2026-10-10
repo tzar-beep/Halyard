@@ -1,0 +1,51 @@
+name: nightly
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Raft simulation sweep (5000 seeds)
+        env:
+          SEEDS: "5000"
+        run: go test -count=1 -timeout 50m ./internal/raft
+  jepsen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: linearizability under faults (5 x 60s)
+        env:
+          JEPSEN_SECONDS: "60"
+        run: go test -count=5 -timeout 25m -v ./tests/jepsen
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        target:
+          - ./internal/resp FuzzReadCommand
+          - ./internal/raft/wal FuzzUnmarshalMessage
+          - ./internal/raft/wal FuzzOpen
+          - ./internal/persistence FuzzDecodeSnapshot
+          - ./internal/shard FuzzDecodeDump
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: fuzz
+        run: |
+          set -- ${{ matrix.target }}
+          go test "$1" -run '^$' -fuzz "^$2\$" -fuzztime 3m
