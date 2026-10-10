@@ -40,7 +40,7 @@ type Config struct {
 
 // New builds a server, recovering the snapshot and AOF first when persistence is enabled.
 func New(cfg Config) (*Server, error) {
-	st := store.New()
+	st := store.NewStore()
 	s := &Server{
 		addr:  cfg.Addr,
 		store: st,
@@ -133,6 +133,7 @@ func (s *Server) handle(c net.Conn) {
 	}()
 	r, w := resp.NewReader(c), resp.NewWriter(c)
 	var sess command.Session
+	defer s.disp.CloseSession(&sess)
 	for {
 		args, err := r.ReadCommand()
 		if err != nil {

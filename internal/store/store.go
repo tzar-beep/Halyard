@@ -1,35 +1,96 @@
-// Package store holds the in-memory keyspace with TTL support.
+// Package store holds the in-memory keyspace: typed values, TTLs, WATCH tracking
+// and copy-on-write snapshots.
 //
-// Concurrency: one RWMutex guards both maps, so every method (including multi-key
-// ones like MSet) is atomic with respect to other callers.
+// Concurrency: all access goes through View (shared lock) or Update (exclusive lock),
+// so a multi-key command or a whole MULTI/EXEC block runs atomically.
 //
 // Expiry: keys with a TTL are also tracked in `expires` (unix ms). Expired keys are
-// removed lazily on access and actively by a background sampler (see expirer).
+// invisible immediately, removed lazily by write transactions, and actively by a
+// background sampler (see expirer).
+//
+// Snapshots: Snapshot bumps an epoch and returns references to the current objects
+// (O(keys), no value copying). A write transaction that wants to mutate a container
+// stamped with an older epoch clones it first (Tx.Mut), so the snapshot's objects are
+// never changed underneath the serializer — the same idea as Redis's fork + COW.
 package store
 
 import (
-	"errors"
-	"math"
-	"strconv"
 	"sync"
 	"time"
 )
 
-var (
-	ErrNotInteger = errors.New("ERR value is not an integer or out of range")
-	ErrOverflow   = errors.New("ERR increment or decrement would overflow")
+type Kind uint8
+
+const (
+	KindString Kind = iota
+	KindList
+	KindHash
+	KindSet
+	KindZSet
 )
 
-// TTL sentinel results, matching Redis.
-const (
-	NoKey    int64 = -2
-	NoExpire int64 = -1
-)
+func (k Kind) String() string {
+	return [...]string{"string", "list", "hash", "set", "zset"}[k]
+}
+
+// Object is one value. Exactly one payload field is used, according to Kind.
+// String payloads are immutable (replaced, never modified in place).
+type Object struct {
+	Kind Kind
+	Str  []byte
+	List *List
+	Hash map[string][]byte
+	Set  map[string]struct{}
+	ZSet *ZSet
+
+	epoch uint64
+}
+
+func NewString(b []byte) *Object { return &Object{Kind: KindString, Str: b} }
+
+// New returns an empty container of the given kind.
+func New(k Kind) *Object {
+	o := &Object{Kind: k}
+	switch k {
+	case KindList:
+		o.List = &List{}
+	case KindHash:
+		o.Hash = map[string][]byte{}
+	case KindSet:
+		o.Set = map[string]struct{}{}
+	case KindZSet:
+		o.ZSet = NewZSet()
+	}
+	return o
+}
+
+func (o *Object) clone() *Object {
+	c := &Object{Kind: o.Kind, Str: o.Str}
+	switch o.Kind {
+	case KindList:
+		c.List = o.List.clone()
+	case KindHash:
+		c.Hash = make(map[string][]byte, len(o.Hash))
+		for k, v := range o.Hash {
+			c.Hash[k] = v
+		}
+	case KindSet:
+		c.Set = make(map[string]struct{}, len(o.Set))
+		for k := range o.Set {
+			c.Set[k] = struct{}{}
+		}
+	case KindZSet:
+		c.ZSet = o.ZSet.clone()
+	}
+	return c
+}
 
 type Store struct {
-	mu      sync.RWMutex
-	data    map[string][]byte
-	expires map[string]int64 // key -> absolute expiry, unix ms
+	mu       sync.RWMutex
+	data     map[string]*Object
+	expires  map[string]int64 // key -> absolute expiry, unix ms
+	epoch    uint64
+	watchers map[string]map[*Watch]struct{}
 
 	now  func() int64
 	stop chan struct{}
@@ -37,15 +98,16 @@ type Store struct {
 }
 
 // New returns a store and starts its active-expiry worker. Call Close to stop it.
-func New() *Store { return newStore(func() int64 { return time.Now().UnixMilli() }, true) }
+func NewStore() *Store { return newStore(func() int64 { return time.Now().UnixMilli() }, true) }
 
 func newStore(now func() int64, active bool) *Store {
 	s := &Store{
-		data:    make(map[string][]byte),
-		expires: make(map[string]int64),
-		now:     now,
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		data:     make(map[string]*Object),
+		expires:  make(map[string]int64),
+		watchers: make(map[string]map[*Watch]struct{}),
+		now:      now,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	if active {
 		go s.expirer()
@@ -64,226 +126,233 @@ func (s *Store) Close() {
 	<-s.done
 }
 
-// expiredLocked reports whether key has an expiry in the past. Caller holds mu (R or W).
-func (s *Store) expiredLocked(key string, now int64) bool {
-	at, ok := s.expires[key]
-	return ok && at <= now
+// View runs fn with a read-only transaction.
+func (s *Store) View(fn func(*Tx)) {
+	now := s.now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	fn(&Tx{s: s, now: now})
 }
 
-// liveLocked returns the value if the key exists and is not expired, deleting it if
-// expired. Caller holds mu for writing.
-func (s *Store) liveLocked(key string, now int64) ([]byte, bool) {
-	if s.expiredLocked(key, now) {
-		s.deleteLocked(key)
-		return nil, false
+// Update runs fn with an exclusive read-write transaction.
+func (s *Store) Update(fn func(*Tx)) {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&Tx{s: s, now: now, write: true})
+}
+
+// Tx is a view of the keyspace at a fixed instant. Only valid inside View/Update.
+type Tx struct {
+	s     *Store
+	now   int64
+	write bool
+}
+
+func (t *Tx) Now() int64 { return t.now }
+
+// Get returns the live object at key, or nil. Never modify the result in place;
+// use Mut.
+func (t *Tx) Get(key string) *Object {
+	o, ok := t.s.data[key]
+	if !ok {
+		return nil
 	}
-	v, ok := s.data[key]
-	return v, ok
+	if at, ok := t.s.expires[key]; ok && at <= t.now {
+		if t.write {
+			t.s.deleteLocked(key)
+		}
+		return nil
+	}
+	return o
 }
 
-func (s *Store) deleteLocked(key string) bool {
-	_, ok := s.data[key]
+// Mut returns key's object for in-place modification, cloning it first if a
+// snapshot may still reference it. Returns nil if the key is missing.
+func (t *Tx) Mut(key string) *Object {
+	o := t.Get(key)
+	if o == nil {
+		return nil
+	}
+	if o.epoch < t.s.epoch && o.Kind != KindString {
+		o = o.clone()
+		o.epoch = t.s.epoch
+		t.s.data[key] = o
+	}
+	t.s.touch(key)
+	return o
+}
+
+// Put stores o at key, keeping any existing (live) TTL.
+func (t *Tx) Put(key string, o *Object) {
+	t.Get(key) // drop an expired predecessor along with its TTL
+	o.epoch = t.s.epoch
+	t.s.data[key] = o
+	t.s.touch(key)
+}
+
+// Delete removes key. Returns whether it existed.
+func (t *Tx) Delete(key string) bool {
+	if t.Get(key) == nil {
+		return false
+	}
+	t.s.deleteLocked(key)
+	return true
+}
+
+func (t *Tx) Exists(key string) bool { return t.Get(key) != nil }
+
+// ExpireAt returns key's absolute expiry in unix ms, or 0 if it has none.
+func (t *Tx) ExpireAt(key string) int64 { return t.s.expires[key] }
+
+// SetExpireAt sets an absolute expiry on an existing key; a past time deletes it.
+func (t *Tx) SetExpireAt(key string, at int64) {
+	if at <= t.now {
+		t.s.deleteLocked(key)
+		return
+	}
+	t.s.expires[key] = at
+	t.s.touch(key)
+}
+
+// Persist removes key's TTL. Returns whether it had one.
+func (t *Tx) Persist(key string) bool {
+	if _, ok := t.s.expires[key]; !ok {
+		return false
+	}
+	delete(t.s.expires, key)
+	t.s.touch(key)
+	return true
+}
+
+// Len counts keys, including expired ones not yet reclaimed (like Redis DBSIZE).
+func (t *Tx) Len() int { return len(t.s.data) }
+
+// Keys calls fn for every live key.
+func (t *Tx) Keys(fn func(key string)) {
+	for k := range t.s.data {
+		if at, ok := t.s.expires[k]; ok && at <= t.now {
+			continue
+		}
+		fn(k)
+	}
+}
+
+// Flush deletes every key.
+func (t *Tx) Flush() {
+	for k := range t.s.watchers {
+		t.s.touch(k)
+	}
+	t.s.data = make(map[string]*Object)
+	t.s.expires = make(map[string]int64)
+}
+
+func (s *Store) deleteLocked(key string) {
 	delete(s.data, key)
 	delete(s.expires, key)
-	return ok
+	s.touch(key)
 }
 
-// Get returns the value for key. Uses a read lock; an expired key is reported missing
-// and left for the writer paths / active expirer to remove.
-func (s *Store) Get(key string) ([]byte, bool) {
-	now := s.now()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.expiredLocked(key, now) {
-		return nil, false
-	}
-	v, ok := s.data[key]
-	return v, ok
+// --- WATCH ---
+
+// Watch tracks keys for optimistic transactions. Any change to a watched key
+// (write, delete, expiry) marks it dirty.
+type Watch struct {
+	dirty   bool
+	keys    []string
+	existed []bool
 }
 
-// MGet returns one entry per key; nil for missing keys.
-func (s *Store) MGet(keys []string) [][]byte {
-	now := s.now()
-	out := make([][]byte, len(keys))
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for i, k := range keys {
-		if !s.expiredLocked(k, now) {
-			out[i] = s.data[k]
-		}
-	}
-	return out
-}
-
-type SetCond int
-
-const (
-	Always SetCond = iota
-	IfNotExists
-	IfExists
-)
-
-type SetOpts struct {
-	Cond     SetCond
-	ExpireAt int64 // unix ms; 0 = no expiry
-	KeepTTL  bool
-}
-
-// Set stores val under key. Returns false if the NX/XX condition prevented the write.
-// The caller must not mutate val afterwards.
-func (s *Store) Set(key string, val []byte, o SetOpts) bool {
+// Watch adds keys to w.
+func (s *Store) Watch(w *Watch, keys []string) {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, exists := s.liveLocked(key, now)
-	if (o.Cond == IfNotExists && exists) || (o.Cond == IfExists && !exists) {
-		return false
-	}
-	s.data[key] = val
-	switch {
-	case o.ExpireAt != 0:
-		s.expires[key] = o.ExpireAt
-	case !o.KeepTTL:
-		delete(s.expires, key)
-	}
-	return true
-}
-
-// MSet sets all pairs atomically and clears their TTLs.
-func (s *Store) MSet(keys []string, vals [][]byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, k := range keys {
-		s.data[k] = vals[i]
-		delete(s.expires, k)
-	}
-}
-
-// Del removes keys and returns how many existed.
-func (s *Store) Del(keys ...string) int {
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
+	t := &Tx{s: s, now: now}
 	for _, k := range keys {
-		if _, ok := s.liveLocked(k, now); ok {
-			s.deleteLocked(k)
-			n++
+		ws := s.watchers[k]
+		if ws == nil {
+			ws = map[*Watch]struct{}{}
+			s.watchers[k] = ws
 		}
+		ws[w] = struct{}{}
+		w.keys = append(w.keys, k)
+		w.existed = append(w.existed, t.Get(k) != nil)
 	}
-	return n
 }
 
-// Exists counts existing keys; duplicates are counted each time, as in Redis.
-func (s *Store) Exists(keys ...string) int {
-	now := s.now()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	n := 0
-	for _, k := range keys {
-		if _, ok := s.data[k]; ok && !s.expiredLocked(k, now) {
-			n++
-		}
-	}
-	return n
-}
-
-// IncrBy adds delta to the integer stored at key (missing = 0), preserving its TTL.
-func (s *Store) IncrBy(key string, delta int64) (int64, error) {
-	now := s.now()
+// Unwatch removes all of w's registrations and resets it.
+func (s *Store) Unwatch(w *Watch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var cur int64
-	if v, ok := s.liveLocked(key, now); ok {
-		n, err := strconv.ParseInt(string(v), 10, 64)
-		if err != nil {
-			return 0, ErrNotInteger
+	for _, k := range w.keys {
+		if ws := s.watchers[k]; ws != nil {
+			delete(ws, w)
+			if len(ws) == 0 {
+				delete(s.watchers, k)
+			}
 		}
-		cur = n
 	}
-	if (delta > 0 && cur > math.MaxInt64-delta) || (delta < 0 && cur < math.MinInt64-delta) {
-		return 0, ErrOverflow
-	}
-	cur += delta
-	s.data[key] = strconv.AppendInt(nil, cur, 10)
-	return cur, nil
+	*w = Watch{}
 }
 
-// ExpireAt sets an absolute expiry (unix ms). Returns false if key is missing.
-// A time in the past deletes the key immediately.
-func (s *Store) ExpireAt(key string, at int64) bool {
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.liveLocked(key, now); !ok {
-		return false
+// Dirty reports whether any watched key changed since it was watched, including
+// keys that have logically expired without being reclaimed yet.
+func (t *Tx) Dirty(w *Watch) bool {
+	if w.dirty {
+		return true
 	}
-	if at <= now {
-		s.deleteLocked(key)
-	} else {
-		s.expires[key] = at
+	for i, k := range w.keys {
+		if w.existed[i] && t.Get(k) == nil {
+			return true
+		}
 	}
-	return true
+	return w.dirty
 }
 
-// PTTL returns remaining ms, NoKey, or NoExpire.
-func (s *Store) PTTL(key string) int64 {
-	now := s.now()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if _, ok := s.data[key]; !ok || s.expiredLocked(key, now) {
-		return NoKey
+func (s *Store) touch(key string) {
+	for w := range s.watchers[key] {
+		w.dirty = true
 	}
-	at, ok := s.expires[key]
-	if !ok {
-		return NoExpire
-	}
-	return at - now
 }
 
-// Persist removes key's TTL. Returns false if key is missing or had no TTL.
-func (s *Store) Persist(key string) bool {
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.liveLocked(key, now); !ok {
-		return false
-	}
-	if _, ok := s.expires[key]; !ok {
-		return false
-	}
-	delete(s.expires, key)
-	return true
-}
+// --- Snapshots ---
 
 // Entry is one key as captured for a snapshot.
 type Entry struct {
 	Key      string
-	Val      []byte // shared with the store; values are never mutated in place
-	ExpireAt int64  // unix ms, 0 = no expiry
+	Obj      *Object // immutable once captured (see package doc)
+	ExpireAt int64   // unix ms, 0 = no expiry
 }
 
-// Snapshot returns a point-in-time copy of all live keys. Values are shared, not
-// copied: the store replaces values rather than mutating them, so this is safe and
-// keeps the writer pause proportional to the key count, not the data size.
+// Snapshot returns a point-in-time view of all live keys in O(keys) time.
 func (s *Store) Snapshot() []Entry {
 	now := s.now()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.epoch++
 	out := make([]Entry, 0, len(s.data))
-	for k, v := range s.data {
+	for k, o := range s.data {
 		at := s.expires[k]
 		if at != 0 && at <= now {
 			continue
 		}
-		out = append(out, Entry{Key: k, Val: v, ExpireAt: at})
+		out = append(out, Entry{Key: k, Obj: o, ExpireAt: at})
 	}
 	return out
 }
 
 // Restore inserts an entry loaded from disk.
 func (s *Store) Restore(e Entry) {
-	s.Set(e.Key, e.Val, SetOpts{ExpireAt: e.ExpireAt})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e.Obj.epoch = s.epoch
+	s.data[e.Key] = e.Obj
+	if e.ExpireAt != 0 {
+		s.expires[e.Key] = e.ExpireAt
+	} else {
+		delete(s.expires, e.Key)
+	}
 }
 
 // Len returns the number of keys, including expired ones not yet reclaimed.
@@ -292,6 +361,8 @@ func (s *Store) Len() int {
 	defer s.mu.RUnlock()
 	return len(s.data)
 }
+
+// --- Active expiry ---
 
 const (
 	expireInterval  = 100 * time.Millisecond

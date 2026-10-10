@@ -36,6 +36,8 @@ func (w *Writer) Bulk(b []byte) {
 
 func (w *Writer) NullBulk() { w.bw.WriteString("$-1\r\n") }
 
+func (w *Writer) NullArray() { w.bw.WriteString("*-1\r\n") }
+
 func (w *Writer) ArrayHeader(n int) { w.prefixed('*', int64(n)) }
 
 func (w *Writer) Flush() error { return w.bw.Flush() }

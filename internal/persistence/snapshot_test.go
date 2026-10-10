@@ -24,11 +24,11 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.snap")
 	future := time.Now().UnixMilli() + 60_000
 	in := []store.Entry{
-		{Key: "plain", Val: []byte("v")},
-		{Key: "bin\x00\r\nkey", Val: []byte("\x00\xff\r\n")},
-		{Key: "empty", Val: []byte{}},
-		{Key: "ttl", Val: []byte("x"), ExpireAt: future},
-		{Key: "expired", Val: []byte("x"), ExpireAt: 1},
+		{Key: "plain", Obj: store.NewString([]byte("v"))},
+		{Key: "bin\x00\r\nkey", Obj: store.NewString([]byte("\x00\xff\r\n"))},
+		{Key: "empty", Obj: store.NewString([]byte{})},
+		{Key: "ttl", Obj: store.NewString([]byte("x")), ExpireAt: future},
+		{Key: "expired", Obj: store.NewString([]byte("x")), ExpireAt: 1},
 	}
 	if err := WriteSnapshot(path, 7, in); err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil || gen != 7 {
 		t.Fatalf("gen %d err %v", gen, err)
 	}
-	if len(got) != 4 || string(got["bin\x00\r\nkey"].Val) != "\x00\xff\r\n" || got["ttl"].ExpireAt != future {
+	if len(got) != 4 || string(got["bin\x00\r\nkey"].Obj.Str) != "\x00\xff\r\n" || got["ttl"].ExpireAt != future {
 		t.Fatalf("got %+v", got)
 	}
 	if _, ok := got["expired"]; ok {
@@ -57,7 +57,7 @@ func TestSnapshotEmpty(t *testing.T) {
 
 func TestSnapshotCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.snap")
-	WriteSnapshot(path, 1, []store.Entry{{Key: "k", Val: []byte("value")}})
+	WriteSnapshot(path, 1, []store.Entry{{Key: "k", Obj: store.NewString([]byte("value"))}})
 	orig, _ := os.ReadFile(path)
 
 	for i := range orig { // flip every byte in turn
@@ -84,7 +84,7 @@ func TestSnapshotLarge(t *testing.T) {
 	const n = 500_000
 	in := make([]store.Entry, n)
 	for i := range in {
-		in[i] = store.Entry{Key: fmt.Sprintf("key:%d", i), Val: []byte(fmt.Sprintf("value:%d", i))}
+		in[i] = store.Entry{Key: fmt.Sprintf("key:%d", i), Obj: store.NewString([]byte(fmt.Sprintf("value:%d", i)))}
 	}
 	t0 := time.Now()
 	if err := WriteSnapshot(path, 1, in); err != nil {
@@ -113,7 +113,7 @@ func newFakeDB() *fakeDB { return &fakeDB{data: map[string]string{}} }
 
 func (f *fakeDB) hooks() Hooks {
 	return Hooks{
-		Restore: func(e store.Entry) { f.data[e.Key] = string(e.Val) },
+		Restore: func(e store.Entry) { f.data[e.Key] = string(e.Obj.Str) },
 		Apply: func(args [][]byte) error {
 			switch string(args[0]) {
 			case "SET":
@@ -130,7 +130,7 @@ func (f *fakeDB) hooks() Hooks {
 			defer f.mu.Unlock()
 			var out []store.Entry
 			for k, v := range f.data {
-				out = append(out, store.Entry{Key: k, Val: []byte(v)})
+				out = append(out, store.Entry{Key: k, Obj: store.NewString([]byte(v))})
 			}
 			return out
 		},

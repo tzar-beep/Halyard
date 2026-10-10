@@ -1,10 +1,13 @@
 // Package command validates and dispatches client commands.
 //
-// Write path: for commands flagged `write`, the dispatcher holds wmu while it applies
-// the mutation to the store and appends the resulting log record to the AOF. This
-// keeps the AOF order identical to the order mutations were applied. The reply sits in
-// the connection's buffer and is only flushed after Dispatch returns, so with
-// appendfsync=always a client is never acknowledged before its write is fsynced.
+// Every command runs inside a store transaction: reads in View, writes in Update,
+// and a MULTI/EXEC block inside a single Update, so each is atomic.
+//
+// Write path: with persistence on, the dispatcher holds wmu while it applies a
+// mutation and appends the resulting log record, keeping the AOF in apply order.
+// The reply sits in the connection's buffer and is only flushed after Dispatch
+// returns, so with appendfsync=always a client is never acknowledged before its write
+// is fsynced.
 package command
 
 import (
@@ -12,11 +15,9 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/tzar-beep/redis/internal/resp"
 	"github.com/tzar-beep/redis/internal/store"
@@ -25,6 +26,8 @@ import (
 const (
 	errSyntax    = "ERR syntax error"
 	errNotInt    = "ERR value is not an integer or out of range"
+	errNotFloat  = "ERR value is not a valid float"
+	errWrongType = "WRONGTYPE Operation against a key holding the wrong kind of value"
 	errNoAuth    = "NOAUTH Authentication required."
 	errWrongPass = "WRONGPASS invalid username-password pair or user is disabled."
 )
@@ -38,13 +41,27 @@ type Persister interface {
 	LastSave() int64
 }
 
-// handler executes a command, writes its reply, and returns the record to persist
-// (nil when nothing changed). Records are deterministic: relative TTLs become
-// absolute timestamps and INCR becomes SET, so replay reproduces the same state.
+type kind uint8
+
+const (
+	read  kind = iota // runs in a read transaction
+	write             // runs in a write transaction and may produce a log record
+	admin             // runs outside any transaction; not allowed in MULTI
+)
+
 type handler struct {
 	arity int // >0 exact arg count incl. name; <0 minimum count
-	write bool
-	fn    func(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte
+	kind  kind
+	fn    func(c *Ctx)
+}
+
+// Ctx is the execution context of one command.
+type Ctx struct {
+	d    *Dispatcher
+	tx   *store.Tx // nil for admin commands
+	w    *resp.Writer
+	args [][]byte
+	rec  [][]byte // record to persist; set only when the command changed state
 }
 
 type Dispatcher struct {
@@ -75,40 +92,36 @@ func (d *Dispatcher) Freeze(fn func()) {
 
 // Session is per-connection state.
 type Session struct {
-	Authed bool
+	Authed  bool
+	inMulti bool
+	txErr   bool // a command failed to queue; EXEC must abort
+	queued  [][][]byte
+	watch   *store.Watch
 }
 
-var table map[string]handler
-
-func init() {
-	table = map[string]handler{
-		"ping":      {-1, false, ping},
-		"echo":      {2, false, echo},
-		"get":       {2, false, get},
-		"mget":      {-2, false, mget},
-		"exists":    {-2, false, exists},
-		"ttl":       {2, false, ttl(time.Second)},
-		"pttl":      {2, false, ttl(time.Millisecond)},
-		"set":       {-3, true, set},
-		"mset":      {-3, true, mset},
-		"del":       {-2, true, del},
-		"incr":      {2, true, incrBy(1)},
-		"decr":      {2, true, incrBy(-1)},
-		"incrby":    {3, true, incrBy(0)},
-		"decrby":    {3, true, incrBy(0)},
-		"expire":    {3, true, expire(time.Second, false)},
-		"pexpire":   {3, true, expire(time.Millisecond, false)},
-		"expireat":  {3, true, expire(time.Second, true)},
-		"pexpireat": {3, true, expire(time.Millisecond, true)},
-		"persist":   {2, true, persist},
-		"dbsize":    {1, false, dbsize},
-		"save":      {1, false, save},
-		"bgsave":    {1, false, bgsave},
-		"lastsave":  {1, false, lastsave},
+// CloseSession releases per-connection resources (WATCH registrations).
+func (d *Dispatcher) CloseSession(sess *Session) {
+	if sess.watch != nil {
+		d.store.Unwatch(sess.watch)
 	}
 }
 
-// Dispatch executes one command and writes its reply to w. A non-nil error means the
+var table = map[string]handler{}
+
+func init() {
+	for _, group := range []map[string]handler{stringCmds, keyCmds, listCmds, hashCmds, setCmds, zsetCmds} {
+		for name, h := range group {
+			table[name] = h
+		}
+	}
+	table["ping"] = handler{-1, admin, ping}
+	table["echo"] = handler{2, admin, echo}
+	table["save"] = handler{1, admin, save}
+	table["bgsave"] = handler{1, admin, bgsave}
+	table["lastsave"] = handler{1, admin, lastsave}
+}
+
+// Dispatch executes one command and writes its reply to w. A non-nil error means a
 // write could not be persisted; the caller must drop the connection without flushing
 // so the client never sees an acknowledgement.
 func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) error {
@@ -124,328 +137,381 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 		w.Error(errNoAuth)
 		return nil
 	}
-	h, ok := d.lookup(w, name, args)
+
+	switch name {
+	case "multi":
+		if sess.inMulti {
+			w.Error("ERR MULTI calls can not be nested")
+		} else {
+			sess.inMulti = true
+			w.SimpleString("OK")
+		}
+		return nil
+	case "exec":
+		return d.exec(w, sess)
+	case "discard":
+		if !sess.inMulti {
+			w.Error("ERR DISCARD without MULTI")
+		} else {
+			d.endMulti(sess)
+			w.SimpleString("OK")
+		}
+		return nil
+	case "watch":
+		if sess.inMulti {
+			w.Error("ERR WATCH inside MULTI is not allowed")
+		} else if len(args) < 2 {
+			w.Error(wrongArgs("watch"))
+		} else {
+			if sess.watch == nil {
+				sess.watch = &store.Watch{}
+			}
+			d.store.Watch(sess.watch, keys(args[1:]))
+			w.SimpleString("OK")
+		}
+		return nil
+	case "unwatch":
+		if sess.watch != nil {
+			d.store.Unwatch(sess.watch)
+		}
+		w.SimpleString("OK")
+		return nil
+	}
+
+	h, ok := lookup(w, name, args)
+	if sess.inMulti {
+		switch {
+		case !ok:
+			sess.txErr = true
+		case h.kind == admin:
+			w.Error("ERR Command not allowed inside a transaction")
+			sess.txErr = true
+		default:
+			sess.queued = append(sess.queued, cloneArgs(args))
+			w.SimpleString("QUEUED")
+		}
+		return nil
+	}
 	if !ok {
 		return nil
 	}
-	if !h.write || d.aof == nil {
-		h.fn(d, w, args)
-		return nil
-	}
-	if err := d.aof.Err(); err != nil {
-		w.Error("MISCONF Errors writing to the AOF file: " + err.Error())
-		return nil
-	}
-	d.wmu.Lock()
-	defer d.wmu.Unlock()
-	if rec := h.fn(d, w, args); rec != nil {
-		if err := d.aof.Append(rec); err != nil {
-			return fmt.Errorf("aof append: %w", err)
+
+	switch h.kind {
+	case admin:
+		h.fn(&Ctx{d: d, w: w, args: args})
+	case read:
+		d.store.View(func(tx *store.Tx) { h.fn(&Ctx{d: d, tx: tx, w: w, args: args}) })
+	case write:
+		if d.aof == nil {
+			d.store.Update(func(tx *store.Tx) { h.fn(&Ctx{d: d, tx: tx, w: w, args: args}) })
+			return nil
+		}
+		if err := d.aof.Err(); err != nil {
+			w.Error("MISCONF Errors writing to the AOF file: " + err.Error())
+			return nil
+		}
+		d.wmu.Lock()
+		defer d.wmu.Unlock()
+		var rec [][]byte
+		d.store.Update(func(tx *store.Tx) {
+			c := &Ctx{d: d, tx: tx, w: w, args: args}
+			h.fn(c)
+			rec = c.rec
+		})
+		if rec != nil {
+			if err := d.aof.Append(rec); err != nil {
+				return fmt.Errorf("aof append: %w", err)
+			}
 		}
 	}
 	return nil
 }
 
-// Apply executes a logged record during AOF replay: no auth, no logging.
-// Not safe for concurrent use; only call before serving clients.
+func (d *Dispatcher) endMulti(sess *Session) {
+	sess.inMulti, sess.txErr, sess.queued = false, false, nil
+	if sess.watch != nil {
+		d.store.Unwatch(sess.watch)
+	}
+}
+
+// exec runs the queued commands atomically in one write transaction and logs them as
+// a single TXN record, so recovery applies all of them or none.
+func (d *Dispatcher) exec(w *resp.Writer, sess *Session) error {
+	if !sess.inMulti {
+		w.Error("ERR EXEC without MULTI")
+		return nil
+	}
+	defer d.endMulti(sess)
+	if sess.txErr {
+		w.Error("EXECABORT Transaction discarded because of previous errors.")
+		return nil
+	}
+	if d.aof != nil {
+		if err := d.aof.Err(); err != nil {
+			w.Error("MISCONF Errors writing to the AOF file: " + err.Error())
+			return nil
+		}
+		d.wmu.Lock()
+		defer d.wmu.Unlock()
+	}
+	var recs [][][]byte
+	aborted := false
+	d.store.Update(func(tx *store.Tx) {
+		if sess.watch != nil && tx.Dirty(sess.watch) {
+			aborted = true
+			return
+		}
+		w.ArrayHeader(len(sess.queued))
+		for _, args := range sess.queued {
+			c := &Ctx{d: d, tx: tx, w: w, args: args}
+			table[strings.ToLower(string(args[0]))].fn(c)
+			if c.rec != nil {
+				recs = append(recs, c.rec)
+			}
+		}
+	})
+	if aborted {
+		w.NullArray()
+		return nil
+	}
+	if d.aof == nil || len(recs) == 0 {
+		return nil
+	}
+	rec := recs[0]
+	if len(recs) > 1 {
+		rec = encodeTxn(recs)
+	}
+	if err := d.aof.Append(rec); err != nil {
+		return fmt.Errorf("aof append: %w", err)
+	}
+	return nil
+}
+
+// encodeTxn packs several records into one: TXN argc1 args1... argc2 args2...
+func encodeTxn(recs [][][]byte) [][]byte {
+	out := [][]byte{[]byte("TXN")}
+	for _, r := range recs {
+		out = append(out, strconv.AppendInt(nil, int64(len(r)), 10))
+		out = append(out, r...)
+	}
+	return out
+}
+
+func decodeTxn(args [][]byte) ([][][]byte, error) {
+	var recs [][][]byte
+	for i := 1; i < len(args); {
+		n, err := strconv.Atoi(string(args[i]))
+		if err != nil || n < 1 || i+1+n > len(args) {
+			return nil, errors.New("malformed TXN record")
+		}
+		recs = append(recs, args[i+1:i+1+n])
+		i += 1 + n
+	}
+	return recs, nil
+}
+
+// Apply executes a logged record during recovery: no auth, no logging, and any
+// error reply is reported as corruption. Only call before serving clients.
 func (d *Dispatcher) Apply(args [][]byte) error {
 	if len(args) == 0 {
 		return nil
 	}
-	d.replayBuf.Reset()
-	h, ok := d.lookup(d.replayW, strings.ToLower(string(args[0])), args)
-	if ok {
-		if !h.write {
-			return fmt.Errorf("non-write command %q in log", args[0])
+	recs := [][][]byte{args}
+	if strings.EqualFold(string(args[0]), "txn") {
+		var err error
+		if recs, err = decodeTxn(args); err != nil {
+			return err
 		}
-		h.fn(d, d.replayW, args)
 	}
-	d.replayW.Flush()
-	if b := d.replayBuf.Bytes(); len(b) > 0 && b[0] == '-' {
-		return errors.New(strings.TrimSpace(string(b[1:])))
-	}
-	return nil
+	var err error
+	d.store.Update(func(tx *store.Tx) {
+		for _, r := range recs {
+			h, ok := table[strings.ToLower(string(r[0]))]
+			if !ok || h.kind != write || !arityOK(h, r) {
+				err = fmt.Errorf("invalid record %q", r[0])
+				return
+			}
+			d.replayBuf.Reset()
+			h.fn(&Ctx{d: d, tx: tx, w: d.replayW, args: r})
+			d.replayW.Flush()
+			if b := d.replayBuf.Bytes(); len(b) > 0 && b[0] == '-' {
+				err = errors.New(strings.TrimSpace(string(b[1:])))
+				return
+			}
+		}
+	})
+	return err
 }
 
-func (d *Dispatcher) lookup(w *resp.Writer, name string, args [][]byte) (handler, bool) {
+func lookup(w *resp.Writer, name string, args [][]byte) (handler, bool) {
 	h, ok := table[name]
 	if !ok {
 		w.Error(fmt.Sprintf("ERR unknown command '%s', with args beginning with: %s", args[0], quoteArgs(args[1:])))
 		return h, false
 	}
-	if (h.arity > 0 && len(args) != h.arity) || (h.arity < 0 && len(args) < -h.arity) {
+	if !arityOK(h, args) {
 		w.Error(wrongArgs(name))
 		return h, false
 	}
 	return h, true
 }
 
+func arityOK(h handler, args [][]byte) bool {
+	return (h.arity > 0 && len(args) == h.arity) || (h.arity < 0 && len(args) >= -h.arity)
+}
+
 func wrongArgs(name string) string {
 	return fmt.Sprintf("ERR wrong number of arguments for '%s' command", name)
 }
 
-func ping(_ *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	switch len(args) {
-	case 1:
-		w.SimpleString("PONG")
-	case 2:
-		w.Bulk(args[1])
-	default:
-		w.Error(wrongArgs("ping"))
+// --- Ctx helpers ---
+
+func (c *Ctx) key(i int) string { return string(c.args[i]) }
+
+// logArgs persists the command exactly as received.
+func (c *Ctx) logArgs() { c.rec = c.args }
+
+// get returns the live object at key if it has kind k. ok=false means a WRONGTYPE
+// error was written.
+func (c *Ctx) get(key string, k store.Kind) (o *store.Object, ok bool) {
+	o = c.tx.Get(key)
+	if o != nil && o.Kind != k {
+		c.w.Error(errWrongType)
+		return nil, false
 	}
-	return nil
+	return o, true
 }
 
-func echo(_ *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	w.Bulk(args[1])
-	return nil
+// mut is get for in-place modification.
+func (c *Ctx) mut(key string, k store.Kind) (*store.Object, bool) {
+	o, ok := c.get(key, k)
+	if !ok || o == nil {
+		return nil, ok
+	}
+	return c.tx.Mut(key), true
 }
 
-func get(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	if v, ok := d.store.Get(string(args[1])); ok {
-		w.Bulk(v)
-	} else {
-		w.NullBulk()
+// mutOrCreate is mut that creates an empty container when the key is missing.
+func (c *Ctx) mutOrCreate(key string, k store.Kind) (*store.Object, bool) {
+	o, ok := c.mut(key, k)
+	if ok && o == nil {
+		o = store.New(k)
+		c.tx.Put(key, o)
 	}
-	return nil
+	return o, ok
 }
 
-// SET key value [NX|XX] [EX s|PX ms|EXAT ts|PXAT ms-ts|KEEPTTL]
-func set(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	var o store.SetOpts
-	hasExpire := false
-	for i := 3; i < len(args); i++ {
-		switch opt := strings.ToUpper(string(args[i])); opt {
-		case "NX", "XX":
-			if o.Cond != store.Always {
-				w.Error(errSyntax)
-				return nil
-			}
-			o.Cond = map[string]store.SetCond{"NX": store.IfNotExists, "XX": store.IfExists}[opt]
-		case "KEEPTTL":
-			if hasExpire {
-				w.Error(errSyntax)
-				return nil
-			}
-			o.KeepTTL = true
-		case "EX", "PX", "EXAT", "PXAT":
-			if hasExpire || o.KeepTTL || i+1 >= len(args) {
-				w.Error(errSyntax)
-				return nil
-			}
-			i++
-			unit := time.Second
-			if opt[0] == 'P' {
-				unit = time.Millisecond
-			}
-			at, ok := toUnixMs(args[i], unit, strings.HasSuffix(opt, "AT"))
-			if !ok {
-				w.Error(errNotInt)
-				return nil
-			}
-			if at == 0 {
-				w.Error("ERR invalid expire time in 'set' command")
-				return nil
-			}
-			o.ExpireAt, hasExpire = at, true
-		default:
-			w.Error(errSyntax)
-			return nil
-		}
+// dropIfEmpty deletes a container key that has no elements left.
+func (c *Ctx) dropIfEmpty(key string, n int) {
+	if n == 0 {
+		c.tx.Delete(key)
 	}
-	key, val := args[1], bytes.Clone(args[2])
-	if !d.store.Set(string(key), val, o) {
-		w.NullBulk()
-		return nil
-	}
-	w.SimpleString("OK")
-	rec := [][]byte{[]byte("SET"), key, val}
-	switch {
-	case o.ExpireAt != 0:
-		rec = append(rec, []byte("PXAT"), strconv.AppendInt(nil, o.ExpireAt, 10))
-	case o.KeepTTL:
-		rec = append(rec, []byte("KEEPTTL"))
-	}
-	return rec
 }
 
-// toUnixMs converts a TTL argument to absolute unix ms.
-// ok=false: not an integer. at=0: non-positive or overflowing value.
-func toUnixMs(arg []byte, unit time.Duration, absolute bool) (at int64, ok bool) {
-	n, err := strconv.ParseInt(string(arg), 10, 64)
+// int parses args[i]; on failure it writes errNotInt.
+func (c *Ctx) int(i int) (int64, bool) {
+	n, err := strconv.ParseInt(string(c.args[i]), 10, 64)
 	if err != nil {
+		c.w.Error(errNotInt)
 		return 0, false
 	}
-	mult := int64(unit / time.Millisecond)
-	var base int64
-	if !absolute {
-		base = time.Now().UnixMilli()
-	}
-	if n <= 0 || n > (math.MaxInt64-base)/mult {
-		return 0, true
-	}
-	return base + n*mult, true
+	return n, true
 }
 
-func mget(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	vals := d.store.MGet(keys(args[1:]))
-	w.ArrayHeader(len(vals))
-	for _, v := range vals {
-		if v == nil {
-			w.NullBulk()
-		} else {
-			w.Bulk(v)
-		}
+// normRange converts Redis-style inclusive indexes (negatives count from the end)
+// into a valid [start, stop] for length n; ok=false if the range is empty.
+func normRange(start, stop int64, n int) (int, int, bool) {
+	if start < 0 {
+		start += int64(n)
 	}
-	return nil
-}
-
-func mset(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	if len(args)%2 != 1 {
-		w.Error(wrongArgs("mset"))
-		return nil
+	if stop < 0 {
+		stop += int64(n)
 	}
-	n := (len(args) - 1) / 2
-	ks, vs := make([]string, n), make([][]byte, n)
-	for i := 0; i < n; i++ {
-		ks[i], vs[i] = string(args[1+2*i]), bytes.Clone(args[2+2*i])
+	if start < 0 {
+		start = 0
 	}
-	d.store.MSet(ks, vs)
-	w.SimpleString("OK")
-	return args
-}
-
-func del(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	n := d.store.Del(keys(args[1:])...)
-	w.Integer(int64(n))
-	if n == 0 {
-		return nil
+	if start > stop || start >= int64(n) {
+		return 0, 0, false
 	}
-	return args
-}
-
-func exists(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	w.Integer(int64(d.store.Exists(keys(args[1:])...)))
-	return nil
-}
-
-// incrBy handles INCR/DECR (fixed delta) and INCRBY/DECRBY (delta=0: read from args).
-// Logged as SET ... KEEPTTL so replay is idempotent with respect to the value.
-func incrBy(delta int64) func(*Dispatcher, *resp.Writer, [][]byte) [][]byte {
-	return func(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-		by := delta
-		if by == 0 {
-			n, err := strconv.ParseInt(string(args[2]), 10, 64)
-			if err != nil {
-				w.Error(errNotInt)
-				return nil
-			}
-			if bytes.EqualFold(args[0], []byte("decrby")) {
-				if n == math.MinInt64 {
-					w.Error("ERR decrement would overflow")
-					return nil
-				}
-				n = -n
-			}
-			by = n
-		}
-		v, err := d.store.IncrBy(string(args[1]), by)
-		if err != nil {
-			w.Error(err.Error())
-			return nil
-		}
-		w.Integer(v)
-		return [][]byte{[]byte("SET"), args[1], strconv.AppendInt(nil, v, 10), []byte("KEEPTTL")}
+	if stop >= int64(n) {
+		stop = int64(n) - 1
 	}
+	return int(start), int(stop), true
 }
 
-// expire handles EXPIRE/PEXPIRE (relative) and EXPIREAT/PEXPIREAT (absolute).
-// Logged as PEXPIREAT, or DEL when the deadline is already past.
-func expire(unit time.Duration, absolute bool) func(*Dispatcher, *resp.Writer, [][]byte) [][]byte {
-	return func(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-		n, err := strconv.ParseInt(string(args[2]), 10, 64)
-		if err != nil {
-			w.Error(errNotInt)
-			return nil
-		}
-		mult := int64(unit / time.Millisecond)
-		now := time.Now().UnixMilli()
-		var base int64
-		if !absolute {
-			base = now
-		}
-		if n > (math.MaxInt64-base)/mult || n < (math.MinInt64+base)/mult {
-			w.Error(fmt.Sprintf("ERR invalid expire time in '%s' command", strings.ToLower(string(args[0]))))
-			return nil
-		}
-		at := base + n*mult
-		if !d.store.ExpireAt(string(args[1]), at) {
-			w.Integer(0)
-			return nil
-		}
-		w.Integer(1)
-		if at <= now {
-			return [][]byte{[]byte("DEL"), args[1]}
-		}
-		return [][]byte{[]byte("PEXPIREAT"), args[1], strconv.AppendInt(nil, at, 10)}
+func keys(args [][]byte) []string {
+	ks := make([]string, len(args))
+	for i, a := range args {
+		ks[i] = string(a)
 	}
+	return ks
 }
 
-func ttl(unit time.Duration) func(*Dispatcher, *resp.Writer, [][]byte) [][]byte {
-	return func(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-		ms := d.store.PTTL(string(args[1]))
-		if ms >= 0 && unit == time.Second {
-			ms = (ms + 500) / 1000 // Redis rounds to nearest second
-		}
-		w.Integer(ms)
-		return nil
+func cloneArgs(args [][]byte) [][]byte {
+	out := make([][]byte, len(args))
+	for i, a := range args {
+		out[i] = bytes.Clone(a)
 	}
+	return out
 }
 
-func persist(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
-	if !d.store.Persist(string(args[1])) {
-		w.Integer(0)
-		return nil
+func b2i(b bool) int64 {
+	if b {
+		return 1
 	}
-	w.Integer(1)
-	return args
+	return 0
 }
 
-func dbsize(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
-	w.Integer(int64(d.store.Len()))
-	return nil
-}
-
-func save(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
-	if d.aof == nil {
-		w.Error("ERR persistence is disabled")
-	} else if err := d.aof.Save(); err != nil {
-		w.Error("ERR " + strings.TrimPrefix(err.Error(), "ERR "))
-	} else {
-		w.SimpleString("OK")
+func quoteArgs(args [][]byte) string {
+	var b strings.Builder
+	for _, a := range args {
+		fmt.Fprintf(&b, "'%s' ", a)
 	}
-	return nil
+	return b.String()
 }
 
-func bgsave(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
-	switch {
-	case d.aof == nil:
-		w.Error("ERR persistence is disabled")
-	case d.aof.BGSave():
-		w.SimpleString("Background saving started")
+// --- connection and admin commands ---
+
+func ping(c *Ctx) {
+	switch len(c.args) {
+	case 1:
+		c.w.SimpleString("PONG")
+	case 2:
+		c.w.Bulk(c.args[1])
 	default:
-		w.Error("ERR Background save already in progress")
+		c.w.Error(wrongArgs("ping"))
 	}
-	return nil
 }
 
-func lastsave(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
-	if d.aof == nil {
-		w.Integer(0)
+func echo(c *Ctx) { c.w.Bulk(c.args[1]) }
+
+func save(c *Ctx) {
+	if c.d.aof == nil {
+		c.w.Error("ERR persistence is disabled")
+	} else if err := c.d.aof.Save(); err != nil {
+		c.w.Error("ERR " + strings.TrimPrefix(err.Error(), "ERR "))
 	} else {
-		w.Integer(d.aof.LastSave())
+		c.w.SimpleString("OK")
 	}
-	return nil
+}
+
+func bgsave(c *Ctx) {
+	switch {
+	case c.d.aof == nil:
+		c.w.Error("ERR persistence is disabled")
+	case c.d.aof.BGSave():
+		c.w.SimpleString("Background saving started")
+	default:
+		c.w.Error("ERR Background save already in progress")
+	}
+}
+
+func lastsave(c *Ctx) {
+	if c.d.aof == nil {
+		c.w.Integer(0)
+	} else {
+		c.w.Integer(c.d.aof.LastSave())
+	}
 }
 
 // AUTH password | AUTH default password
@@ -472,20 +538,4 @@ func (d *Dispatcher) auth(w *resp.Writer, sess *Session, args [][]byte) {
 	}
 	sess.Authed = true
 	w.SimpleString("OK")
-}
-
-func keys(args [][]byte) []string {
-	ks := make([]string, len(args))
-	for i, a := range args {
-		ks[i] = string(a)
-	}
-	return ks
-}
-
-func quoteArgs(args [][]byte) string {
-	var b strings.Builder
-	for _, a := range args {
-		fmt.Fprintf(&b, "'%s' ", a)
-	}
-	return b.String()
 }

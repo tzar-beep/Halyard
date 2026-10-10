@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc64"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,13 +32,67 @@ import (
 //	crc      uint64              CRC-64/ECMA of every preceding byte
 //
 // Length-prefixed fields keep keys and values binary-safe.
+//
+// Version 2 adds container types; the value encoding depends on type:
+//
+//	0 string  valLen uvarint, bytes
+//	1 list    count uvarint, count × (len, bytes)          head to tail
+//	2 hash    count uvarint, count × (field, value)
+//	3 set     count uvarint, count × member
+//	4 zset    count uvarint, count × (member, score float64 bits)  ascending
+//
+// Version 1 files (strings only) are still readable.
 const (
 	snapMagic   = "GRSNAP"
-	snapVersion = 1
-	typeString  = 0
+	snapVersion = 2
 	opEOF       = 0xFF
 	maxFieldLen = 512 << 20
+	maxElems    = 1 << 32
 )
+
+func readObject(kind store.Kind, readBytes func() ([]byte, error), readCount func() (int, error), br io.Reader) (*store.Object, error) {
+	if kind == store.KindString {
+		v, err := readBytes()
+		return store.NewString(v), err
+	}
+	n, err := readCount()
+	if err != nil {
+		return nil, err
+	}
+	o := store.New(kind)
+	for j := 0; j < n; j++ {
+		m, err := readBytes()
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
+		case store.KindList:
+			o.List.PushBack(m)
+		case store.KindHash:
+			v, err := readBytes()
+			if err != nil {
+				return nil, err
+			}
+			o.Hash[string(m)] = v
+		case store.KindSet:
+			o.Set[string(m)] = struct{}{}
+		case store.KindZSet:
+			var b [8]byte
+			if _, err := io.ReadFull(br, b[:]); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrBadSnapshot, err)
+			}
+			s := math.Float64frombits(binary.BigEndian.Uint64(b[:]))
+			if math.IsNaN(s) {
+				return nil, fmt.Errorf("%w: NaN score", ErrBadSnapshot)
+			}
+			o.ZSet.Add(string(m), s)
+		}
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("%w: empty container", ErrBadSnapshot)
+	}
+	return o, nil
+}
 
 var crcTable = crc64.MakeTable(crc64.ECMA)
 
@@ -64,11 +119,38 @@ func WriteSnapshot(path string, gen uint64, entries []store.Entry) error {
 	bw.Write(buf[:2])
 	putU64(gen)
 	putU64(uint64(len(entries)))
+	putCount := func(n int) { bw.Write(buf[:binary.PutUvarint(buf[:], uint64(n))]) }
 	for _, e := range entries {
-		bw.WriteByte(typeString)
+		o := e.Obj
+		bw.WriteByte(byte(o.Kind))
 		putU64(uint64(e.ExpireAt))
 		putBytes([]byte(e.Key))
-		putBytes(e.Val)
+		switch o.Kind {
+		case store.KindString:
+			putBytes(o.Str)
+		case store.KindList:
+			putCount(o.List.Len())
+			for i := 0; i < o.List.Len(); i++ {
+				putBytes(o.List.At(i))
+			}
+		case store.KindHash:
+			putCount(len(o.Hash))
+			for f, v := range o.Hash {
+				putBytes([]byte(f))
+				putBytes(v)
+			}
+		case store.KindSet:
+			putCount(len(o.Set))
+			for m := range o.Set {
+				putBytes([]byte(m))
+			}
+		case store.KindZSet:
+			putCount(o.ZSet.Len())
+			o.ZSet.Each(func(m string, s float64) {
+				putBytes([]byte(m))
+				putU64(math.Float64bits(s))
+			})
+		}
 	}
 	bw.WriteByte(opEOF)
 	if err := bw.Flush(); err != nil {
@@ -136,8 +218,9 @@ func ReadSnapshot(path string, restore func(store.Entry)) (gen uint64, err error
 	if !bytes.Equal(head[:len(snapMagic)], []byte(snapMagic)) {
 		return 0, fmt.Errorf("%w: bad magic", ErrBadSnapshot)
 	}
-	if v := binary.BigEndian.Uint16(head[6:8]); v != snapVersion {
-		return 0, fmt.Errorf("%w: unsupported version %d", ErrBadSnapshot, v)
+	version := binary.BigEndian.Uint16(head[6:8])
+	if version < 1 || version > snapVersion {
+		return 0, fmt.Errorf("%w: unsupported version %d", ErrBadSnapshot, version)
 	}
 	gen = binary.BigEndian.Uint64(head[8:16])
 	count := binary.BigEndian.Uint64(head[16:24])
@@ -153,13 +236,21 @@ func ReadSnapshot(path string, restore func(store.Entry)) (gen uint64, err error
 		}
 		return b, nil
 	}
+	readCount := func() (int, error) {
+		n, err := binary.ReadUvarint(br)
+		if err != nil || n > maxElems {
+			return 0, fmt.Errorf("%w: bad element count", ErrBadSnapshot)
+		}
+		return int(n), nil
+	}
 	now := time.Now().UnixMilli()
 	var fixed [9]byte
 	for i := uint64(0); i < count; i++ {
 		if _, err := io.ReadFull(br, fixed[:]); err != nil {
 			return 0, fmt.Errorf("%w: record %d: %v", ErrBadSnapshot, i, err)
 		}
-		if fixed[0] != typeString {
+		kind := store.Kind(fixed[0])
+		if kind > store.KindZSet || (version == 1 && kind != store.KindString) {
 			return 0, fmt.Errorf("%w: record %d: unknown type %d", ErrBadSnapshot, i, fixed[0])
 		}
 		exp := int64(binary.BigEndian.Uint64(fixed[1:]))
@@ -167,14 +258,14 @@ func ReadSnapshot(path string, restore func(store.Entry)) (gen uint64, err error
 		if err != nil {
 			return 0, err
 		}
-		val, err := readBytes()
+		o, err := readObject(kind, readBytes, readCount, br)
 		if err != nil {
 			return 0, err
 		}
 		if exp != 0 && exp <= now {
 			continue
 		}
-		restore(store.Entry{Key: string(key), Val: val, ExpireAt: exp})
+		restore(store.Entry{Key: string(key), Obj: o, ExpireAt: exp})
 	}
 	if b, err := br.ReadByte(); err != nil || b != opEOF {
 		return 0, fmt.Errorf("%w: missing EOF marker", ErrBadSnapshot)
