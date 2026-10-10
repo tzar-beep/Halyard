@@ -1,9 +1,9 @@
 # Build Your Own Redis — Phased Plan (Go)
 
 Goal: a Redis-compatible key-value server in Go that speaks RESP2 over TCP, works with `redis-cli`, and supports TTL, AOF + snapshot persistence and leader-follower replication. It should be benchmarked against real Redis and fault-tested.
-Pace: about 2–3 h/day, 6 days/week, ~7 weeks. Each phase must compile, pass its tests and be committed before the next phase starts.
+Pace: about 2–3 h/day, ~14 weeks. Each phase must compile, pass its tests and be committed before the next phase starts.
 
-Out of scope: Redis Cluster, Lua, Pub/Sub, ACLs, the full command set and automatic leader election.
+Out of scope: Lua, modules and RESP3-only features.
 
 ---
 
@@ -41,30 +41,48 @@ Out of scope: Redis Cluster, Lua, Pub/Sub, ACLs, the full command set and automa
 - Tests: empty and large datasets, expired keys, bad checksum, crash before rename, crash between rename and rotation.
 - **Exit:** no write that the durability contract promises to keep is lost across any of these transitions.
 
-## Phase 5 — Leader-follower replication (Week 5)
-- Contract: only the leader accepts writes; mutations carry monotonically increasing offsets and are applied in order; followers are read-only.
-- Full sync: snapshot + offset, with the leader buffering writes made during the transfer.
-- Incremental sync: a bounded backlog. A reconnecting follower sends its offset; if the backlog no longer has that offset, it falls back to full sync.
-- Backpressure: queue limits, write deadlines, reconnect backoff and rules for a follower that falls behind. Expose state through `INFO replication`.
-- Fault tests: initial sync, 10k-key comparison, disconnect/reconnect, backlog overflow, leader kill and leader restart.
-- **Exit:** a follower catches up after interruption, and behavior under failure is documented and reproducible.
+## Phase 5 — Data structures (Week 5)
+- Typed values: lists (quicklist-style), hashes, sets and sorted sets, using a **hand-written skiplist** with rank queries (ZADD/ZRANGE/ZRANK/ZRANGEBYSCORE).
+- `WRONGTYPE` errors. MULTI/EXEC/WATCH transactions (optimistic, checked against key versions).
+- Snapshot format v2 that stores every type. Property-based tests that compare against a simple reference model.
+- **Exit:** randomized differential tests against real Redis (same command stream, same replies).
 
-## Phase 6 — Reliability + performance (Week 6)
-- `redis-benchmark` against real Redis on the same machine and workload, varying clients and pipeline depth. Record ops/s, p50/p95/p99 latency, CPU, memory, recovery time and replication lag.
-- `FuzzParseRequest` with seeds for valid, empty, truncated, oversized, embedded-NUL and concatenated input. It must never panic, hang or allocate without bound.
-- Stress tests with hundreds of connections running reads, writes and expiry under `-race`.
-- A Jepsen-style harness: write numbered keys, record acknowledgements, kill the server, restart it and verify the result against the durability contract.
-- **Exit:** published, reproducible numbers and fault results.
+## Phase 6 — Raft consensus, written from scratch (Weeks 6–8)
+- Leader election (randomized timeouts, terms, votes), log replication, commit index, and the safety rules from the Raft paper.
+- Persistent `currentTerm`, `votedFor` and the log. The Raft log replaces the AOF as the write-ahead log.
+- Log compaction through snapshots plus `InstallSnapshot`. Membership changes (one server at a time).
+- **Linearizable** writes and reads (ReadIndex, or leader leases with a documented clock assumption). Clients follow `MOVED`/redirects to the leader.
+- **Automatic failover:** kill the leader and a new one is elected in under about 1 s with **zero acknowledged-write loss**.
+- **Exit:** 3- and 5-node clusters survive leader kill, follower kill and network partitions.
 
-## Phase 7 — Packaging + polish (Week 7)
-- CLI flags: address, data dir, AOF policy, snapshot interval, role and leader address, log level.
-- A Docker Compose demo with one leader and one follower on separate volumes.
-- GitHub Actions: build, `vet`, `test -race`. Fuzzing and benchmarks run in a separate workflow.
-- Docs: Architecture, Benchmark report, Failure analysis (one hard bug), and a list of unsupported features.
-- Resume bullet that uses only measured numbers.
-- **Exit:** all items in the final checklist (22) are checked.
+## Phase 7 — Sharding (Weeks 9–10)
+- 16,384 hash slots (CRC16, `{hashtag}` support). Each shard is a Raft group (multi-Raft).
+- `CLUSTER SLOTS`/`CLUSTER SHARDS`, and `MOVED`/`ASK` redirects compatible with `redis-cli -c`.
+- **Live slot migration** between groups while clients keep writing, with no lost or duplicated keys.
+- **Exit:** throughput grows close to linearly from 1 to 3 shards.
+
+## Phase 8 — Proving correctness (Weeks 11–12) ← this is what makes it 10/10
+- **Deterministic simulation testing** (the approach FoundationDB and TigerBeetle use): a single-threaded simulator with fake network, disk and clock driven by a seed. It injects partitions, delays, reordering, crashes and torn writes, and replays any failing seed exactly.
+- **Linearizability checking** with Porcupine on histories recorded under faults.
+- A Jepsen-style harness against the real binaries in Docker: `tc netem`/iptables partitions, kill -9 and clock skew.
+- Fuzzing of the parser, the AOF/snapshot readers and Raft RPC decoding.
+- **Exit:** millions of simulated seeds with no safety violation. Every bug found becomes a seed in the regression suite.
+
+## Phase 9 — Performance engineering (Week 13)
+- Profile with pprof, then: a parser that doesn't allocate, a sharded keyspace (fewer lock collisions), **group commit** for `appendfsync always`, and batching of Raft AppendEntries.
+- `redis-benchmark` against real Redis: ops/s and p50/p99/p999 latency, single node vs. cluster. Flame graphs go in the report.
+- **Exit:** published, reproducible numbers that show the before/after effect of each optimization.
+
+## Phase 10 — Production polish + deploy (Week 14)
+- Prometheus `/metrics` (ops, latency histograms, Raft term/commit lag, fsync time), structured logs, `INFO`.
+- TLS, ACL users, graceful shutdown, configuration through a file.
+- Deploy a 3-node cluster on Oracle Cloud Always Free, plus a Vercel site with a live web terminal, a cluster view (leader, terms, slots) and a **"kill the leader" button** that shows failover live.
+- CI: build, vet, `-race`, a nightly simulation sweep and fuzzing.
+- Docs: design doc, Raft safety argument, benchmark report, and three bug write-ups found by simulation.
+- **Exit:** a public demo, plus a resume line backed only by measured numbers.
 
 ---
 
 ### Phase dependency
-0 → 1 → 2 → 3 → 4 → 5 → 6 → 7. Replication starts only after single-node persistence and recovery pass their tests.
+0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10. Phase 8's simulator should be built alongside Phase 6 (design the network, disk and clock as interfaces from the start).
+Done: 0–3.
