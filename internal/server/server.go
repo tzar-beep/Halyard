@@ -14,8 +14,9 @@ import (
 )
 
 type Server struct {
-	addr string
-	disp *command.Dispatcher
+	addr  string
+	store *store.Store
+	disp  *command.Dispatcher
 
 	mu    sync.Mutex
 	ln    net.Listener
@@ -30,9 +31,11 @@ type Config struct {
 }
 
 func New(cfg Config) *Server {
+	st := store.New()
 	return &Server{
 		addr:  cfg.Addr,
-		disp:  command.NewDispatcher(store.New(), cfg.Password),
+		store: st,
+		disp:  command.NewDispatcher(st, cfg.Password),
 		conns: map[net.Conn]struct{}{},
 	}
 }
@@ -89,6 +92,7 @@ func (s *Server) Close() error {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+	s.store.Close()
 	return err
 }
 
