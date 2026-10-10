@@ -350,3 +350,5 @@ tbody tr:hover td { background: rgba(255, 255, 255, 0.015); }
   #topo { min-width: 760px; }
   .topo-panel { overflow-x: auto; }
 }
+
+.logo-mark { display: block; border-radius: 5px; }
