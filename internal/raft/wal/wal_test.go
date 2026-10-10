@@ -145,3 +145,32 @@ func FuzzUnmarshalMessage(f *testing.F) {
 		}
 	})
 }
+
+// FuzzOpen: a WAL file with arbitrary contents must open cleanly or report
+// ErrCorrupt — never panic, never return entries with gaps.
+func FuzzOpen(f *testing.F) {
+	dir := f.TempDir()
+	w, _, _ := Open(dir)
+	hs := raft.HardState{Term: 1, Commit: 2}
+	w.Save(&hs, ents(1, 1, 3), nil)
+	w.Close()
+	seed, _ := os.ReadFile(filepath.Join(dir, walName))
+	f.Add(seed)
+	f.Fuzz(func(t *testing.T, b []byte) {
+		d := t.TempDir()
+		os.WriteFile(filepath.Join(d, walName), b, 0o644)
+		w, p, err := Open(d)
+		if err != nil {
+			return
+		}
+		defer w.Close()
+		for i := 1; i < len(p.Entries); i++ {
+			if p.Entries[i].Index != p.Entries[i-1].Index+1 {
+				t.Fatalf("gap in recovered log")
+			}
+		}
+		if n := len(p.Entries); p.HardState.Commit > 0 && (n == 0 || p.HardState.Commit > p.Entries[n-1].Index) {
+			t.Fatalf("commit %d beyond recovered log", p.HardState.Commit)
+		}
+	})
+}

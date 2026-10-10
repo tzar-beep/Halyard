@@ -54,6 +54,10 @@ type Config struct {
 	SnapshotEntries uint64        // compact the log after this many applied entries (default 10000)
 	ProposeTimeout  time.Duration // default 5s
 	Secret          string        // shared secret for node-to-node connections
+	// UnsafeReads serves reads from local state on any node without the ReadIndex
+	// check. It exists only so tests can prove the linearizability checker
+	// catches the resulting stale reads. Never enable it in production.
+	UnsafeReads bool
 }
 
 // StateMachine is what the node replicates.
@@ -580,6 +584,9 @@ func (n *Node) Propose(args [][]byte) ([]byte, error) {
 }
 
 func (n *Node) ReadBarrier() error {
+	if n.cfg.UnsafeReads {
+		return nil
+	}
 	if st := n.CurrentStatus(); st.State != raft.StateLeader {
 		return n.redirect()
 	}

@@ -62,6 +62,7 @@ type sim struct {
 	now     int
 	group   map[NodeID]int // nodes talk only within the same group
 	loss    float64
+	torn    float64 // probability that a Ready's persist is cut short by a crash
 	leaders map[uint64]NodeID
 	global  map[uint64]string // index -> fingerprint of the entry applied there
 	acked   []string
@@ -131,6 +132,10 @@ func (s *sim) connected(a, b NodeID) bool { return s.group[a] == s.group[b] }
 func (s *sim) process(nd *simNode) {
 	for nd.up && nd.r.HasReady() {
 		rd := nd.r.Ready()
+		if s.torn > 0 && s.rng.Float64() < s.torn {
+			s.tornWrite(nd, rd)
+			return
+		}
 		// 1. persist
 		if rd.Snapshot != nil {
 			nd.disk.Snapshot = rd.Snapshot
@@ -181,6 +186,49 @@ func (s *sim) process(nd *simNode) {
 		s.serveReads(nd)
 		s.checkLeader(nd)
 	}
+}
+
+// tornWrite models a crash in the middle of persisting a Ready: the WAL keeps only
+// a prefix of the batch (its torn tail is cut off on restart). The snapshot file is
+// replaced atomically, so it is either old or new. Records are written entries
+// first, hard state last, so the hard state survives only if every entry did.
+// Nothing from this Ready was sent or applied.
+func (s *sim) tornWrite(nd *simNode, rd Ready) {
+	k := s.rng.IntN(len(rd.Entries) + 1)
+	if rd.Snapshot != nil {
+		if s.rng.IntN(2) == 0 {
+			nd.disk.Snapshot = rd.Snapshot
+			nd.disk.Entries = nil
+		} else {
+			k = 0 // crashed before the snapshot: nothing after it was written either
+		}
+	}
+	if k > 0 {
+		first := rd.Entries[0].Index
+		var keep []Entry
+		for _, e := range nd.disk.Entries {
+			if e.Index < first {
+				keep = append(keep, e)
+			}
+		}
+		if sn := nd.disk.Snapshot; sn == nil || first > sn.Meta.Index {
+			nd.disk.Entries = append(keep, rd.Entries[:k]...)
+		}
+	}
+	if rd.HSChanged && k == len(rd.Entries) && s.rng.IntN(2) == 0 {
+		nd.disk.HardState = rd.HardState
+	}
+	// The hard state's commit index can never point past the durable log.
+	last := uint64(0)
+	if sn := nd.disk.Snapshot; sn != nil {
+		last = sn.Meta.Index
+	}
+	if n := len(nd.disk.Entries); n > 0 {
+		last = nd.disk.Entries[n-1].Index
+	}
+	nd.disk.HardState.Commit = min(nd.disk.HardState.Commit, last)
+	nd.up = false
+	s.log("n%d crashed mid-persist (kept %d/%d entries)", nd.id, k, len(rd.Entries))
 }
 
 func (s *sim) apply(nd *simNode, e Entry) {
@@ -391,7 +439,7 @@ func (s *sim) chaos(ticks int) {
 // settle heals everything and checks the cluster converges and stays available.
 func (s *sim) settle() {
 	s.heal()
-	s.loss = 0
+	s.loss, s.torn = 0, 0
 	for _, id := range s.ids {
 		if !s.nodes[id].up && !s.removed[id] {
 			s.restart(s.nodes[id])
@@ -413,7 +461,9 @@ func (s *sim) settle() {
 	for _, id := range voters {
 		nd := s.nodes[id]
 		if nd.appliedIdx != l.appliedIdx {
-			s.fatalf("LIVENESS: n%d applied %d, leader n%d applied %d", id, nd.appliedIdx, l.id, l.appliedIdx)
+			s.fatalf("LIVENESS: n%d applied %d (up=%v state=%v term=%d commit=%d last=%d snap=%d disk=%d ents), leader n%d applied %d term %d last %d",
+				id, nd.appliedIdx, nd.up, nd.r.State(), nd.r.Term(), nd.r.Committed(), nd.r.LastIndex(), nd.r.SnapIndex(), len(nd.disk.Entries),
+				l.id, l.appliedIdx, l.r.Term(), l.r.LastIndex())
 		}
 		if !slices.Equal(nd.sm, l.sm) {
 			s.fatalf("DIVERGENCE: n%d state machine differs from leader", id)
@@ -454,6 +504,7 @@ func TestSimSafetyAndLiveness(t *testing.T) {
 		for _, n := range []int{3, 5} {
 			s := newSim(t, seed, n)
 			s.loss = 0.1
+			s.torn = 0.002
 			s.chaos(3000)
 			s.settle()
 			if len(s.acked) == 0 {
