@@ -3,3 +3,4 @@
 *.aof
 *.snap
 /data/
+.claude/
