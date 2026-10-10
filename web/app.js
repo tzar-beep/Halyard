@@ -207,8 +207,11 @@ function render() {
   renderTopo(l);
   renderNodes(l);
 }
+let misses = 0;
 async function tick() {
   await Promise.all(nodes.map(poll));
+  misses = nodes.some((n) => n.up) ? 0 : misses + 1;
+  $("offline").hidden = misses < 2;
   render();
   $("clock").textContent = clock();
 }
