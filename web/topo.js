@@ -1,116 +1,116 @@
 "use strict";
-// Animated replication topology: nodes, curved links, and packets (heartbeats,
-// appends, acks) moving along them. Built once; update() only changes state.
+// Network pipeline view: leader in the centre, followers left and right, each link a
+// three-lane pipe (appends →, heartbeats →, acks ←) carrying comet-shaped packets.
 window.Topo = (() => {
   const NS = "http://www.w3.org/2000/svg";
-  const W = 720, H = 420;
-  const POS = [[360, 92], [170, 318], [550, 318]];
-  const BLOCKS = 12;
-  let svg, edgeLayer, packetLayer, nodeEls = [], edges = {}, packets = [], pool = [];
-  let state = { roles: [], leader: -1, rate: 0 };
-  let lastBeat = 0, appendAcc = 0, last = performance.now();
+  const W = 1160, H = 250, CY = 118;
+  const SLOT_X = [170, 580, 990];          // left, centre, right
+  const CW = 224, CH = 138;                // card size
+  const LANE = { append: -16, beat: 0, ack: 16 };
+  const BLOCKS = 16, TAIL = 7;
+  let svg, pipeLayer, pktLayer, cards = [], pipes = {}, packets = [], pool = [];
+  let st = { roles: [], leader: -1, rate: 0, slots: [0, 1, 2] };
+  let lastBeat = 0, acc = 0, last = performance.now();
 
-  const el = (tag, attrs = {}, parent) => {
-    const e = document.createElementNS(NS, tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]);
-    if (parent) parent.appendChild(e);
-    return e;
-  };
-
-  // Quadratic curve between two nodes, bowed away from the centre.
-  function curve(a, b) {
-    const [x1, y1] = POS[a], [x2, y2] = POS[b];
-    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-    const cx = W / 2, cy = (POS[0][1] + POS[1][1] * 2) / 3;
-    const dx = mx - cx, dy = my - cy, len = Math.hypot(dx, dy) || 1;
-    return { x1, y1, x2, y2, qx: mx + (dx / len) * 34, qy: my + (dy / len) * 34 };
-  }
-  const at = (c, t) => {
-    const u = 1 - t;
-    return [u * u * c.x1 + 2 * u * t * c.qx + t * t * c.x2, u * u * c.y1 + 2 * u * t * c.qy + t * t * c.y2];
-  };
+  const el = (tag, a = {}, p) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; };
 
   function init(svgEl, names) {
     svg = svgEl;
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     const defs = el("defs", {}, svg);
-    const pat = el("pattern", { id: "dots", width: 18, height: 18, patternUnits: "userSpaceOnUse" }, defs);
-    el("circle", { cx: 1, cy: 1, r: 1, class: "bgdot" }, pat);
-    const glow = el("filter", { id: "glow", x: "-50%", y: "-50%", width: "200%", height: "200%" }, defs);
-    el("feGaussianBlur", { stdDeviation: 6, result: "b" }, glow);
-    const m = el("feMerge", {}, glow);
-    el("feMergeNode", { in: "b" }, m); el("feMergeNode", { in: "SourceGraphic" }, m);
-    const pg = el("filter", { id: "pglow", x: "-200%", y: "-200%", width: "500%", height: "500%" }, defs);
-    el("feGaussianBlur", { stdDeviation: 2.5, result: "b" }, pg);
-    const m2 = el("feMerge", {}, pg);
-    el("feMergeNode", { in: "b" }, m2); el("feMergeNode", { in: "SourceGraphic" }, m2);
-    el("rect", { width: W, height: H, fill: "url(#dots)" }, svg);
+    const pat = el("pattern", { id: "grid", width: 24, height: 24, patternUnits: "userSpaceOnUse" }, defs);
+    el("path", { d: "M24 0H0V24", class: "gridline" }, pat);
+    const vg = el("radialGradient", { id: "spot", cx: "50%", cy: "50%", r: "50%" }, defs);
+    el("stop", { offset: "0", "stop-color": "#3fb950", "stop-opacity": "0.10" }, vg);
+    el("stop", { offset: "1", "stop-color": "#3fb950", "stop-opacity": "0" }, vg);
+    const sh = el("filter", { id: "lift", x: "-20%", y: "-20%", width: "140%", height: "160%" }, defs);
+    el("feDropShadow", { dx: 0, dy: 8, stdDeviation: 10, "flood-color": "#000", "flood-opacity": 0.55 }, sh);
+    const gl = el("filter", { id: "pglow", x: "-300%", y: "-300%", width: "700%", height: "700%" }, defs);
+    el("feGaussianBlur", { stdDeviation: 3, result: "b" }, gl);
+    const m = el("feMerge", {}, gl); el("feMergeNode", { in: "b" }, m); el("feMergeNode", { in: "SourceGraphic" }, m);
 
-    edgeLayer = el("g", {}, svg);
-    for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) {
-      const c = curve(a, b);
-      const d = `M${c.x1} ${c.y1} Q${c.qx} ${c.qy} ${c.x2} ${c.y2}`;
-      edges[a + "-" + b] = { base: el("path", { d, class: "edge" }, edgeLayer), live: el("path", { d, class: "edge-live" }, edgeLayer) };
+    el("rect", { width: W, height: H, fill: "url(#grid)" }, svg);
+    el("ellipse", { cx: SLOT_X[1], cy: CY, rx: 360, ry: 170, fill: "url(#spot)", class: "spot" }, svg);
+
+    // Pipes: one per side (left/right of centre).
+    pipeLayer = el("g", {}, svg);
+    for (const side of ["L", "R"]) {
+      const g = el("g", { class: "pipe" }, pipeLayer);
+      const x1 = side === "L" ? SLOT_X[0] + CW / 2 : SLOT_X[1] + CW / 2;
+      const x2 = side === "L" ? SLOT_X[1] - CW / 2 : SLOT_X[2] - CW / 2;
+      el("rect", { x: x1, y: CY - 30, width: x2 - x1, height: 60, rx: 10, class: "pipe-body" }, g);
+      for (const k in LANE) el("line", { x1, x2, y1: CY + LANE[k], y2: CY + LANE[k], class: "lane " + k }, g);
+      const lbl = el("text", { x: (x1 + x2) / 2, y: CY - 40, class: "pipe-label", "text-anchor": "middle" }, g);
+      pipes[side] = { g, x1, x2, lbl };
     }
-    packetLayer = el("g", {}, svg);
+    // Follower ↔ follower: dim arc underneath.
+    el("path", { d: `M${SLOT_X[0]} ${CY + CH / 2} Q${SLOT_X[1]} ${H + 10} ${SLOT_X[2]} ${CY + CH / 2}`, class: "peer-arc" }, svg);
+    pktLayer = el("g", {}, svg);
 
-    nodeEls = names.map((name, i) => {
-      const g = el("g", { class: "tn follower", transform: `translate(${POS[i][0]},${POS[i][1]})` }, svg);
-      el("circle", { r: 70, class: "halo" }, g);
-      el("circle", { r: 70, class: "ripple" }, g);
-      el("rect", { x: -92, y: -50, width: 184, height: 100, rx: 14, class: "card" }, g);
-      // server glyph
-      const ic = el("g", { transform: "translate(-74,-34)", class: "glyph" }, g);
-      for (let k = 0; k < 3; k++) {
-        el("rect", { x: 0, y: k * 9, width: 22, height: 7, rx: 2 }, ic);
-        el("circle", { cx: 18, cy: k * 9 + 3.5, r: 1.3, class: "led" }, ic);
-      }
-      const name_ = el("text", { x: -42, y: -20, class: "tn-name" }, g); name_.textContent = name;
-      const badge = el("g", { transform: "translate(40,-27)" }, g);
-      el("rect", { x: -32, y: -10, width: 72, height: 20, rx: 10, class: "badge" }, badge);
-      const role = el("text", { x: 4, y: 4, class: "tn-role", "text-anchor": "middle" }, badge);
-      const meta = el("text", { x: -74, y: 10, class: "tn-meta" }, g);
-      const blocks = [];
-      for (let k = 0; k < BLOCKS; k++) blocks.push(el("rect", { x: -74 + k * 12.6, y: 24, width: 9.6, height: 12, rx: 2, class: "blk" }, g));
-      const lag = el("text", { x: 74, y: 10, class: "tn-lag", "text-anchor": "end" }, g);
-      return { g, role, meta, blocks, lag };
+    cards = names.map((name, i) => {
+      const g = el("g", { class: "nc follower" }, svg);
+      g.style.transform = `translate(${SLOT_X[i]}px, ${CY}px)`;
+      el("rect", { x: -CW / 2 - 7, y: -CH / 2 - 7, width: CW + 14, height: CH + 14, rx: 18, class: "ring" }, g);
+      el("rect", { x: -CW / 2, y: -CH / 2, width: CW, height: CH, rx: 14, class: "body", filter: "url(#lift)" }, g);
+      el("rect", { x: -CW / 2, y: -CH / 2, width: CW, height: 3, rx: 1.5, class: "accent" }, g);
+      el("circle", { cx: -CW / 2 + 22, cy: -CH / 2 + 28, r: 4.5, class: "led" }, g);
+      const t = el("text", { x: -CW / 2 + 36, y: -CH / 2 + 34, class: "nc-name" }, g); t.textContent = name;
+      el("rect", { x: CW / 2 - 92, y: -CH / 2 + 15, width: 76, height: 24, rx: 12, class: "pill" }, g);
+      const role = el("text", { x: CW / 2 - 54, y: -CH / 2 + 31, class: "nc-role", "text-anchor": "middle" }, g);
+      const kv = (x, label) => {
+        const l = el("text", { x, y: -2, class: "nc-k" }, g); l.textContent = label;
+        return el("text", { x, y: 18, class: "nc-v" }, g);
+      };
+      const term = kv(-CW / 2 + 22, "TERM"), idx = kv(-CW / 2 + 92, "INDEX"), lag = kv(-CW / 2 + 170, "LAG");
+      const bw = (CW - 44 - (BLOCKS - 1) * 3) / BLOCKS;
+      const blocks = [...Array(BLOCKS)].map((_, k) => el("rect", { x: -CW / 2 + 22 + k * (bw + 3), y: CH / 2 - 30, width: bw, height: 12, rx: 2, class: "blk" }, g));
+      return { g, role, term, idx, lag, blocks };
     });
     requestAnimationFrame(frame);
   }
 
-  function spawn(from, to, kind) {
-    if (from === to) return;
-    const key = Math.min(from, to) + "-" + Math.max(from, to);
-    const c = curve(Math.min(from, to), Math.max(from, to));
-    const dot = pool.pop() || el("circle", {}, packetLayer);
-    dot.setAttribute("class", "pkt " + kind);
-    dot.setAttribute("r", kind === "append" ? 4 : kind === "beat" ? 3 : 2.4);
-    dot.setAttribute("filter", "url(#pglow)");
-    dot.style.display = "";
-    packets.push({ c, rev: from > to, t: 0, speed: kind === "ack" ? 1.4 : 1.1, kind, dot, from, to, key });
+  const slotOf = (node) => st.slots.indexOf(node); // 0 left, 1 centre, 2 right
+
+  function spawn(fromSlot, toSlot, kind) {
+    const side = Math.min(fromSlot, toSlot) === 0 ? "L" : "R";
+    const p = pipes[side];
+    const forward = toSlot > fromSlot;
+    const dots = pool.pop() || [...Array(TAIL)].map(() => el("circle", {}, pktLayer));
+    dots.forEach((d, i) => {
+      d.setAttribute("class", "pkt " + kind);
+      d.setAttribute("r", (kind === "append" ? 4.2 : kind === "beat" ? 3.2 : 2.8) * (1 - i / (TAIL + 1)));
+      d.setAttribute("opacity", (1 - i / TAIL).toFixed(2));
+      d.setAttribute("filter", i === 0 ? "url(#pglow)" : "");
+      d.style.display = "";
+    });
+    packets.push({ x1: forward ? p.x1 : p.x2, x2: forward ? p.x2 : p.x1, y: CY + LANE[kind], t: 0, kind, dots, from: fromSlot, to: toSlot });
   }
 
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    const { roles, leader, rate } = state;
+    const { roles, leader, rate } = st;
     if (leader >= 0) {
-      const live = [0, 1, 2].filter((i) => i !== leader && roles[i] !== "down");
-      if (now - lastBeat > 650) { lastBeat = now; live.forEach((f) => spawn(leader, f, "beat")); }
-      appendAcc += Math.min(rate, 10) * dt;
-      while (appendAcc >= 1) { appendAcc -= 1; live.forEach((f) => spawn(leader, f, "append")); }
+      const live = [0, 2].filter((s) => roles[st.slots[s]] !== "down");
+      if (now - lastBeat > 700) { lastBeat = now; live.forEach((s) => spawn(1, s, "beat")); }
+      acc += Math.min(rate, 12) * dt;
+      while (acc >= 1) { acc -= 1; live.forEach((s) => spawn(1, s, "append")); }
     }
     packets = packets.filter((p) => {
-      p.t += p.speed * dt;
-      if (p.t >= 1) {
-        p.dot.style.display = "none";
-        pool.push(p.dot);
-        if (p.kind !== "ack" && roles[p.to] !== "down") spawn(p.to, p.from, "ack");
+      p.t += (p.kind === "ack" ? 1.25 : 0.95) * dt;
+      if (p.t >= 1 + TAIL * 0.025) {
+        p.dots.forEach((d) => { d.style.display = "none"; });
+        pool.push(p.dots);
+        if (p.kind !== "ack" && roles[st.slots[p.to]] !== "down") spawn(p.to, p.from, "ack");
         return false;
       }
-      const [x, y] = at(p.c, p.rev ? 1 - p.t : p.t);
-      p.dot.setAttribute("cx", x.toFixed(1));
-      p.dot.setAttribute("cy", y.toFixed(1));
+      p.dots.forEach((d, i) => {
+        const t = Math.max(0, Math.min(1, p.t - i * 0.025));
+        const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // ease in-out
+        d.setAttribute("cx", (p.x1 + (p.x2 - p.x1) * e).toFixed(1));
+        d.setAttribute("cy", p.y);
+        d.style.visibility = p.t - i * 0.025 < 0 || p.t - i * 0.025 > 1 ? "hidden" : "visible";
+      });
       return true;
     });
     requestAnimationFrame(frame);
@@ -118,25 +118,30 @@ window.Topo = (() => {
 
   // info[i] = { role, term, commit, applied }
   function update(info, leaderIdx, rate) {
-    state = { roles: info.map((x) => x.role), leader: leaderIdx, rate };
+    // Leader takes the centre slot; the others keep their relative order.
+    const slots = leaderIdx >= 0 ? [...info.keys()].filter((i) => i !== leaderIdx) : [0, 2];
+    st = { roles: info.map((x) => x.role), leader: leaderIdx, rate,
+      slots: leaderIdx >= 0 ? [slots[0], leaderIdx, slots[1]] : [0, 1, 2] };
     const lc = leaderIdx >= 0 ? info[leaderIdx].commit : Math.max(...info.map((x) => x.commit || 0));
     info.forEach((x, i) => {
-      const n = nodeEls[i];
-      n.g.setAttribute("class", "tn " + x.role);
-      n.role.textContent = x.role;
-      const down = x.role === "down";
-      n.meta.textContent = down ? "no heartbeat" : `T${x.term} · #${x.applied}`;
-      const behind = down ? null : Math.max(0, lc - x.applied);
-      n.lag.textContent = down ? "" : behind ? `−${behind}` : "in sync";
-      n.blocks.forEach((b, k) => {
+      const c = cards[i], down = x.role === "down";
+      c.g.setAttribute("class", "nc " + x.role);
+      c.g.style.transform = `translate(${SLOT_X[slotOf(i)]}px, ${CY}px)`;
+      c.role.textContent = x.role === "pre-candidate" ? "pre-vote" : x.role;
+      c.term.textContent = down ? "—" : x.term;
+      c.idx.textContent = down ? "—" : x.applied.toLocaleString("en-US");
+      const behind = Math.max(0, lc - x.applied);
+      c.lag.textContent = down ? "—" : behind ? `${behind}` : "0";
+      c.blocks.forEach((b, k) => {
         const idx = lc - (BLOCKS - 1) + k;
         b.setAttribute("class", "blk" + (!down && idx > 0 && x.applied >= idx ? " on" : ""));
       });
     });
-    for (const key in edges) {
-      const [a, b] = key.split("-").map(Number);
-      const active = leaderIdx >= 0 && (a === leaderIdx || b === leaderIdx) && info[a].role !== "down" && info[b].role !== "down";
-      edges[key].live.setAttribute("class", "edge-live" + (active ? " on" : ""));
+    for (const side of ["L", "R"]) {
+      const f = st.slots[side === "L" ? 0 : 2];
+      const ok = leaderIdx >= 0 && info[f].role !== "down";
+      pipes[side].g.setAttribute("class", "pipe" + (ok ? " live" : leaderIdx >= 0 ? " broken" : ""));
+      pipes[side].lbl.textContent = leaderIdx < 0 ? "no leader" : ok ? `replicating to n${f + 1}` : `n${f + 1} unreachable`;
     }
   }
 
