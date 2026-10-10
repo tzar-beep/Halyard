@@ -208,7 +208,7 @@ func UnmarshalMessage(b []byte) (Message, error) {
 	if d.u8() == 1 {
 		m.Snapshot = d.snapshot()
 	}
-	if d.err == nil && (len(d.b) != 0 || m.Type == 0 || m.Type > MsgSnap) {
+	if d.err == nil && (len(d.b) != 0 || m.Type == 0 || m.Type > MsgTimeoutNow) {
 		d.err = ErrDecode
 	}
 	return m, d.err

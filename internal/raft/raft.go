@@ -125,6 +125,7 @@ type Raft struct {
 	maxEntries                        int
 
 	pendingConfIndex uint64
+	leadTransferee   NodeID
 	pendingReads     []readReq
 	readsAwaitCommit []uint64 // reads received before the leader committed in its term
 
@@ -241,6 +242,7 @@ func (r *Raft) reset(term uint64) {
 	r.randomizedTimeout = r.electionTimeout + r.rand.IntN(r.electionTimeout)
 	r.votes = map[NodeID]bool{}
 	r.prs = nil
+	r.leadTransferee = None
 	r.pendingReads, r.readsAwaitCommit = nil, nil
 }
 
@@ -303,6 +305,7 @@ func (r *Raft) tickLeader() {
 			r.becomeFollower(r.term, None)
 			return
 		}
+		r.leadTransferee = None // a transfer that did not finish in time is abandoned
 		for id, pr := range r.prs {
 			if id != r.id {
 				pr.recentActive = false
@@ -332,7 +335,13 @@ func (r *Raft) Campaign() {
 	}
 }
 
-func (r *Raft) campaign(pre bool) {
+// transferCtx marks votes requested because of a leadership transfer; voters then
+// ignore their leader lease, since the current leader asked for the election.
+const transferCtx = ^uint64(0)
+
+func (r *Raft) campaign(pre bool) { r.campaignWith(pre, 0) }
+
+func (r *Raft) campaignWith(pre bool, ctx uint64) {
 	var term uint64
 	var typ MsgType
 	if pre {
@@ -348,7 +357,7 @@ func (r *Raft) campaign(pre bool) {
 	}
 	for _, id := range sortedIDs(r.voters) {
 		if id != r.id {
-			r.send(Message{Type: typ, To: id, Term: term, Index: r.log.lastIndex(), LogTerm: r.log.lastTerm()})
+			r.send(Message{Type: typ, To: id, Term: term, Index: r.log.lastIndex(), LogTerm: r.log.lastTerm(), Context: ctx})
 		}
 	}
 }
@@ -400,7 +409,8 @@ func (r *Raft) send(m Message) {
 func (r *Raft) Step(m Message) {
 	switch {
 	case m.Term > r.term:
-		if (m.Type == MsgVote || m.Type == MsgPreVote) && r.lead != None && r.electionElapsed < r.electionTimeout {
+		if (m.Type == MsgVote || m.Type == MsgPreVote) && m.Context != transferCtx &&
+			r.lead != None && r.electionElapsed < r.electionTimeout {
 			// Leader lease (CheckQuorum): we heard from a live leader recently, so
 			// ignore disruptive campaigns, e.g. from a removed or partitioned node.
 			return
@@ -472,6 +482,11 @@ func (r *Raft) stepFollower(m Message) {
 	case MsgSnap:
 		r.electionElapsed, r.lead = 0, m.From
 		r.handleSnapshot(m)
+	case MsgTimeoutNow:
+		if r.promotable() {
+			// Skip PreVote: the leader asked us to take over.
+			r.campaignWith(false, transferCtx)
+		}
 	}
 }
 
@@ -550,6 +565,9 @@ func (r *Raft) stepLeader(m Message) {
 		wasPaused := pr.isPaused()
 		if !pr.maybeUpdate(m.Index) {
 			return
+		}
+		if m.From == r.leadTransferee && pr.match == r.log.lastIndex() {
+			r.send(Message{Type: MsgTimeoutNow, To: m.From})
 		}
 		switch {
 		case pr.state == probe:
@@ -708,6 +726,9 @@ func (r *Raft) propose(e Entry) (uint64, uint64, error) {
 	if r.state != StateLeader {
 		return 0, 0, ErrNotLeader
 	}
+	if r.leadTransferee != None {
+		return 0, 0, ErrTransfering
+	}
 	r.appendEntries(e)
 	r.bcastAppend()
 	return r.log.lastIndex(), r.term, nil
@@ -753,6 +774,27 @@ func (r *Raft) readAck(from NodeID, ctx uint64) {
 		r.pendingReads = r.pendingReads[i+1:]
 		return
 	}
+}
+
+// TransferLeadership asks `to` to take over. Once its log is current it receives
+// MsgTimeoutNow and campaigns; proposals are refused meanwhile. The transfer is
+// abandoned if it does not complete within an election timeout.
+func (r *Raft) TransferLeadership(to NodeID) error {
+	if r.state != StateLeader {
+		return ErrNotLeader
+	}
+	pr := r.prs[to]
+	if to == r.id || pr == nil {
+		return nil
+	}
+	r.leadTransferee = to
+	r.electionElapsed = 0
+	if pr.match == r.log.lastIndex() {
+		r.send(Message{Type: MsgTimeoutNow, To: to})
+	} else {
+		r.sendAppend(to)
+	}
+	return nil
 }
 
 // ApplyConfChange updates membership. Call it when a conf change entry is applied.

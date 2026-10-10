@@ -370,6 +370,12 @@ func (s *sim) chaos(ticks int) {
 			if nd.up {
 				s.compact(nd)
 			}
+		case x < 0.034:
+			if l := s.leader(); l != nil {
+				to := s.ids[s.rng.IntN(len(s.ids))]
+				l.r.TransferLeadership(to)
+				s.log("n%d transferring leadership to n%d", l.id, to)
+			}
 		case x < 0.25:
 			if l := s.leader(); l != nil {
 				s.propose(l)
@@ -537,4 +543,31 @@ func TestSingleNode(t *testing.T) {
 	if len(s.acked) != 1 || len(l.reads) != 0 {
 		t.Fatalf("acked %v, pending reads %d", s.acked, len(l.reads))
 	}
+}
+
+func TestLeadershipTransfer(t *testing.T) {
+	s := newSim(t, 3, 3)
+	for s.leader() == nil {
+		s.step()
+	}
+	for i := 0; i < 20; i++ {
+		s.propose(s.leader())
+		s.step()
+	}
+	l := s.leader()
+	to := NodeID(1)
+	if l.id == 1 {
+		to = 2
+	}
+	l.r.TransferLeadership(to)
+	if _, _, err := l.r.Propose([]byte("x")); err != ErrTransfering {
+		t.Fatalf("proposal during transfer: %v", err)
+	}
+	for i := 0; i < 5*electionTick; i++ {
+		s.step()
+		if nl := s.leader(); nl != nil && nl.id == to {
+			return
+		}
+	}
+	t.Fatalf("leadership did not move to n%d", to)
 }

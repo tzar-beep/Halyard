@@ -38,6 +38,7 @@ var (
 	ErrNotLeader   = errors.New("raft: not leader")
 	ErrConfPending = errors.New("raft: a membership change is already in progress")
 	ErrCompacted   = errors.New("raft: index compacted")
+	ErrTransfering = errors.New("raft: leadership transfer in progress")
 )
 
 type EntryType uint8
@@ -116,9 +117,10 @@ const (
 	MsgHeartbeat
 	MsgHeartbeatResp
 	MsgSnap
+	MsgTimeoutNow // leadership transfer: campaign immediately
 )
 
-var msgNames = [...]string{"", "App", "AppResp", "Vote", "VoteResp", "PreVote", "PreVoteResp", "Heartbeat", "HeartbeatResp", "Snap"}
+var msgNames = [...]string{"", "App", "AppResp", "Vote", "VoteResp", "PreVote", "PreVoteResp", "Heartbeat", "HeartbeatResp", "Snap", "TimeoutNow"}
 
 func (t MsgType) String() string {
 	if int(t) < len(msgNames) {
