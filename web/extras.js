@@ -46,12 +46,12 @@ function renderLogs() {
   $("logcols").innerHTML = nodes.map((n) => {
     const lg = logState[n.name];
     const r = role(n, l);
+    const prev = seenMax[n.name] || Infinity;
+    if (lg && lg.entries && lg.entries.length) seenMax[n.name] = lg.entries[lg.entries.length - 1].index;
     const rows = !lg || r === "down"
       ? '<li class="lg-empty">unreachable</li>'
       : (lg.entries || []).slice().reverse().map((e) => `<li class="${e.index > lg.commit ? "pending" : ""} ${e.kind}${e.index > prev ? " fresh" : ""}">
           <span class="lg-idx">${e.index}</span><span class="lg-term t${e.term % 6}">T${e.term}</span><span class="lg-desc">${esc(e.desc)}</span></li>`).join("");
-    const prev = seenMax[n.name] || Infinity;
-    if (lg && lg.entries && lg.entries.length) seenMax[n.name] = lg.entries[lg.entries.length - 1].index;
     return `<div class="logcol ${r}"><div class="logcol-head"><span>${n.name}</span><span class="role ${r}">${r}</span></div><ol>${rows}</ol></div>`;
   }).join("");
 }

@@ -22,6 +22,15 @@ redis-cli -c -p 6382 GET user:42           # any node; -c follows MOVED to the l
 | **Sharding** | 16,384 hash slots over multiple Raft groups, `MOVED`/`ASK`, `CLUSTER SLOTS`, **live slot migration** with no lost or duplicated writes |
 | **Ops** | Prometheus metrics, `INFO`, ACL users and roles, TLS, config file, Docker Compose, a web demo with a "kill the leader" button |
 
+## Raft playground
+
+`web/index.html` runs the production `internal/raft` package, compiled to WebAssembly, as a five-node cluster
+in the browser: crash nodes, partition them, add packet loss, and replay any run from its seed.
+
+```bash
+GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o web/raft.wasm ./cmd/playground
+```
+
 ## Evidence
 
 | Check | Result |

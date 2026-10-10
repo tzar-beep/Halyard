@@ -214,6 +214,10 @@ func (r *Raft) Voters() []NodeID  { return sortedIDs(r.voters) }
 // LatestSnapshot returns the most recent snapshot (local or installed), or nil.
 func (r *Raft) LatestSnapshot() *Snapshot { return r.snapshot }
 
+// Timers reports election-timer progress (for visualizations): ticks elapsed and
+// the current randomized timeout.
+func (r *Raft) Timers() (elapsed, timeout int) { return r.electionElapsed, r.randomizedTimeout }
+
 // RecentEntries returns up to k of the newest log entries (not compacted).
 func (r *Raft) RecentEntries(k int) []Entry {
 	hi := r.log.lastIndex() + 1

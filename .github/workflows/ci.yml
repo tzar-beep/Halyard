@@ -26,5 +26,7 @@ jobs:
           REDIS_ADDR: 127.0.0.1:6400
           DIFF_SEEDS: "50"
         run: go test -count=1 ./tests/differential
+      - name: playground (WebAssembly)
+        run: GOOS=js GOARCH=wasm go build -o /tmp/raft.wasm ./cmd/playground
       - name: docker image
         run: docker build -t halyard .
