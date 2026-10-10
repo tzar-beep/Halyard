@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/tzar-beep/redis/internal/cluster"
 	"github.com/tzar-beep/redis/internal/command"
 	"github.com/tzar-beep/redis/internal/persistence"
 	"github.com/tzar-beep/redis/internal/resp"
@@ -19,6 +20,7 @@ type Server struct {
 	store *store.Store
 	disp  *command.Dispatcher
 	pm    *persistence.Manager // nil when persistence is disabled
+	node  *cluster.Node        // non-nil in cluster mode
 
 	mu    sync.Mutex
 	ln    net.Listener
@@ -36,10 +38,16 @@ type Config struct {
 	// AutoSaveBytes snapshots and starts a new AOF segment when the current one
 	// exceeds this size. 0 disables.
 	AutoSaveBytes int64
+	// Cluster, if set, replicates all writes through Raft. AOF/snapshot settings
+	// are then ignored: the Raft WAL and snapshots provide durability.
+	Cluster *cluster.Config
 }
 
 // New builds a server, recovering the snapshot and AOF first when persistence is enabled.
 func New(cfg Config) (*Server, error) {
+	if cfg.Cluster != nil {
+		return newClustered(cfg)
+	}
 	st := store.NewStore()
 	s := &Server{
 		addr:  cfg.Addr,
@@ -115,6 +123,9 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.store.Close()
+	if s.node != nil {
+		s.node.Stop()
+	}
 	if s.pm != nil {
 		if aerr := s.pm.Close(); err == nil {
 			err = aerr
@@ -159,3 +170,53 @@ func (s *Server) handle(c net.Conn) {
 		}
 	}
 }
+
+func newClustered(cfg Config) (*Server, error) {
+	st := store.NewReplicatedStore()
+	s := &Server{
+		addr:  cfg.Addr,
+		store: st,
+		disp:  command.NewDispatcher(st, cfg.Password),
+		conns: map[net.Conn]struct{}{},
+	}
+	ccfg := *cfg.Cluster
+	if ccfg.Secret == "" {
+		ccfg.Secret = cfg.Password
+	}
+	node, err := cluster.Start(ccfg, replicatedSM{st: st, d: s.disp})
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	s.node = node
+	s.disp.SetReplicator(node)
+	return s, nil
+}
+
+// Node returns the Raft node in cluster mode (nil otherwise).
+func (s *Server) Node() *cluster.Node { return s.node }
+
+// replicatedSM adapts the keyspace to the cluster's state machine interface.
+type replicatedSM struct {
+	st *store.Store
+	d  *command.Dispatcher
+}
+
+func (r replicatedSM) ApplyCommand(now int64, args [][]byte) []byte {
+	return r.d.ApplyCommand(now, args)
+}
+
+func (r replicatedSM) Snapshot() []byte {
+	return persistence.EncodeSnapshot(0, r.st.Snapshot())
+}
+
+func (r replicatedSM) Restore(data []byte) error {
+	var entries []store.Entry
+	if _, err := persistence.DecodeSnapshot(data, func(e store.Entry) { entries = append(entries, e) }); err != nil {
+		return err
+	}
+	r.st.Replace(entries)
+	return nil
+}
+
+func (r replicatedSM) ExpiredKeys(now int64, n int) []string { return r.st.ExpiredKeys(now, n) }

@@ -100,6 +100,13 @@ type Store struct {
 // New returns a store and starts its active-expiry worker. Call Close to stop it.
 func NewStore() *Store { return newStore(func() int64 { return time.Now().UnixMilli() }, true) }
 
+// NewReplicatedStore returns a store without the background expirer. Replicas must
+// change state only through the replicated log (UpdateAt), so expired keys are
+// removed by explicit log entries instead.
+func NewReplicatedStore() *Store {
+	return newStore(func() int64 { return time.Now().UnixMilli() }, false)
+}
+
 func newStore(now func() int64, active bool) *Store {
 	s := &Store{
 		data:     make(map[string]*Object),
@@ -140,6 +147,48 @@ func (s *Store) Update(fn func(*Tx)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fn(&Tx{s: s, now: now, write: true})
+}
+
+// UpdateAt is Update with a caller-supplied clock. Replicas applying the same log
+// entry with the same timestamp make identical decisions about expiry.
+func (s *Store) UpdateAt(now int64, fn func(*Tx)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&Tx{s: s, now: now, write: true})
+}
+
+// Replace discards everything and loads entries (snapshot installation).
+func (s *Store) Replace(entries []Entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.watchers {
+		s.touch(k)
+	}
+	s.data = make(map[string]*Object, len(entries))
+	s.expires = make(map[string]int64)
+	for _, e := range entries {
+		e.Obj.epoch = s.epoch
+		s.data[e.Key] = e.Obj
+		if e.ExpireAt != 0 {
+			s.expires[e.Key] = e.ExpireAt
+		}
+	}
+}
+
+// ExpiredKeys returns up to n keys whose TTL has passed at the given time.
+func (s *Store) ExpiredKeys(now int64, n int) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for k, at := range s.expires {
+		if len(out) == n {
+			break
+		}
+		if at <= now {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Tx is a view of the keyspace at a fixed instant. Only valid inside View/Update.

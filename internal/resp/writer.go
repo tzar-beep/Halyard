@@ -40,6 +40,9 @@ func (w *Writer) NullArray() { w.bw.WriteString("*-1\r\n") }
 
 func (w *Writer) ArrayHeader(n int) { w.prefixed('*', int64(n)) }
 
+// Raw writes pre-encoded RESP bytes.
+func (w *Writer) Raw(b []byte) { w.bw.Write(b) }
+
 func (w *Writer) Flush() error { return w.bw.Flush() }
 
 func (w *Writer) prefixed(p byte, n int64) {

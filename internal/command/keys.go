@@ -22,6 +22,22 @@ var keyCmds = map[string]handler{
 	"pexpireat": {3, write, expire(time.Millisecond, true)},
 	"persist":   {2, write, persist},
 	"flushall":  {-1, write, flushall},
+	// Internal: proposed by the cluster leader to replicate expiry; not callable
+	// by clients.
+	"delexpired": {-1, write, delExpired},
+}
+
+// delExpired removes the given keys if they have expired at the entry's timestamp.
+func delExpired(c *Ctx) {
+	n := 0
+	for _, k := range c.args[1:] {
+		key := string(k)
+		if at := c.tx.ExpireAt(key); at != 0 && at <= c.tx.Now() {
+			c.tx.Get(key) // a write transaction reclaims expired keys on access
+			n++
+		}
+	}
+	c.w.Integer(int64(n))
 }
 
 func exists(c *Ctx) {

@@ -107,9 +107,40 @@ func WriteSnapshot(path string, gen uint64, entries []store.Entry) error {
 		return err
 	}
 	defer os.Remove(tmp) // no-op after a successful rename
+	if err := encodeSnapshot(f, gen, entries); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
 
+// EncodeSnapshot returns the snapshot encoding of entries in memory (used to ship
+// state machine snapshots through Raft).
+func EncodeSnapshot(gen uint64, entries []store.Entry) []byte {
+	var b bytes.Buffer
+	encodeSnapshot(&b, gen, entries)
+	return b.Bytes()
+}
+
+// DecodeSnapshot is ReadSnapshot for an in-memory encoding.
+func DecodeSnapshot(b []byte, restore func(store.Entry)) (uint64, error) {
+	return decodeSnapshot(bytes.NewReader(b), int64(len(b)), restore)
+}
+
+func encodeSnapshot(out io.Writer, gen uint64, entries []store.Entry) error {
 	crc := crc64.New(crcTable)
-	bw := bufio.NewWriterSize(io.MultiWriter(f, crc), 1<<16)
+	bw := bufio.NewWriterSize(io.MultiWriter(out, crc), 1<<16)
 	var buf [binary.MaxVarintLen64]byte
 	putU64 := func(v uint64) { binary.BigEndian.PutUint64(buf[:8], v); bw.Write(buf[:8]) }
 	putBytes := func(b []byte) { bw.Write(buf[:binary.PutUvarint(buf[:], uint64(len(b)))]); bw.Write(b) }
@@ -154,26 +185,11 @@ func WriteSnapshot(path string, gen uint64, entries []store.Entry) error {
 	}
 	bw.WriteByte(opEOF)
 	if err := bw.Flush(); err != nil {
-		f.Close()
 		return err
 	}
 	binary.BigEndian.PutUint64(buf[:8], crc.Sum64())
-	if _, err := f.Write(buf[:8]); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	syncDir(filepath.Dir(path))
-	return nil
+	_, err := out.Write(buf[:8])
+	return err
 }
 
 // ReadSnapshot verifies the checksum, then streams records to restore, skipping keys
@@ -184,16 +200,19 @@ func ReadSnapshot(path string, restore func(store.Entry)) (gen uint64, err error
 		return 0, err
 	}
 	defer f.Close()
-
-	// Pass 1: checksum, so corrupt length fields are never trusted for allocation.
 	st, err := f.Stat()
 	if err != nil {
 		return 0, err
 	}
-	if st.Size() < int64(len(snapMagic))+2+8+8+1+8 {
+	return decodeSnapshot(f, st.Size(), restore)
+}
+
+func decodeSnapshot(f io.ReadSeeker, size int64, restore func(store.Entry)) (gen uint64, err error) {
+	// Pass 1: checksum, so corrupt length fields are never trusted for allocation.
+	if size < int64(len(snapMagic))+2+8+8+1+8 {
 		return 0, fmt.Errorf("%w: file too short", ErrBadSnapshot)
 	}
-	body := st.Size() - 8
+	body := size - 8
 	crc := crc64.New(crcTable)
 	if _, err := io.Copy(crc, io.LimitReader(f, body)); err != nil {
 		return 0, err

@@ -66,8 +66,9 @@ type Ctx struct {
 
 type Dispatcher struct {
 	store    *store.Store
-	password string    // empty disables AUTH
-	aof      Persister // nil disables persistence
+	password string     // empty disables AUTH
+	aof      Persister  // nil disables persistence
+	repl     Replicator // non-nil in cluster mode
 	wmu      sync.Mutex
 
 	replayBuf bytes.Buffer
@@ -139,6 +140,12 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 	}
 
 	switch name {
+	case "raft":
+		d.raftCmd(w, args)
+		return nil
+	case "delexpired":
+		w.Error(fmt.Sprintf("ERR unknown command '%s', with args beginning with: %s", args[0], quoteArgs(args[1:])))
+		return nil
 	case "multi":
 		if sess.inMulti {
 			w.Error("ERR MULTI calls can not be nested")
@@ -158,7 +165,9 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 		}
 		return nil
 	case "watch":
-		if sess.inMulti {
+		if d.repl != nil {
+			w.Error("ERR WATCH is not supported in cluster mode")
+		} else if sess.inMulti {
 			w.Error("ERR WATCH inside MULTI is not allowed")
 		} else if len(args) < 2 {
 			w.Error(wrongArgs("watch"))
@@ -193,6 +202,10 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 		return nil
 	}
 	if !ok {
+		return nil
+	}
+	if d.repl != nil {
+		d.dispatchCluster(w, h, name, args)
 		return nil
 	}
 
@@ -244,6 +257,14 @@ func (d *Dispatcher) exec(w *resp.Writer, sess *Session) error {
 	defer d.endMulti(sess)
 	if sess.txErr {
 		w.Error("EXECABORT Transaction discarded because of previous errors.")
+		return nil
+	}
+	if d.repl != nil {
+		if len(sess.queued) == 0 {
+			w.ArrayHeader(0)
+			return nil
+		}
+		d.propose(w, encodeTxn(sess.queued))
 		return nil
 	}
 	if d.aof != nil {

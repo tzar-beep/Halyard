@@ -11,7 +11,10 @@ type Config struct {
 	ID NodeID
 	// Peers are the founding voters (including ID), used only when the node has no
 	// persisted state. Empty for a node that will be added to an existing cluster.
-	Peers         []NodeID
+	Peers []NodeID
+	// PeerContexts are stored in the bootstrap conf-change entries (e.g. addresses),
+	// so every node, including ones that join later, learns them from the log.
+	PeerContexts  map[NodeID][]byte
 	ElectionTick  int // ticks without a leader before campaigning (randomized ×[1,2))
 	HeartbeatTick int
 	MaxEntries    int // max entries per MsgApp
@@ -169,7 +172,7 @@ func New(c Config, p Persisted) *Raft {
 		ents := make([]Entry, len(c.Peers))
 		for i, id := range c.Peers {
 			ents[i] = Entry{Term: 1, Index: uint64(i + 1), Type: EntryConfChange,
-				Data: ConfChange{Type: AddNode, Node: id}.Marshal()}
+				Data: ConfChange{Type: AddNode, Node: id, Context: c.PeerContexts[id]}.Marshal()}
 		}
 		r.log.ents, r.log.unstable = ents, 1
 		r.log.committed = uint64(len(ents))
@@ -206,6 +209,9 @@ func (r *Raft) Applied() uint64   { return r.log.applied }
 func (r *Raft) LastIndex() uint64 { return r.log.lastIndex() }
 func (r *Raft) SnapIndex() uint64 { return r.log.snapIndex }
 func (r *Raft) Voters() []NodeID  { return sortedIDs(r.voters) }
+
+// LatestSnapshot returns the most recent snapshot (local or installed), or nil.
+func (r *Raft) LatestSnapshot() *Snapshot { return r.snapshot }
 func (r *Raft) hardState() HardState {
 	return HardState{Term: r.term, Vote: r.vote, Commit: r.log.committed}
 }
