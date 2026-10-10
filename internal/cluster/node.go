@@ -101,15 +101,16 @@ type Status struct {
 }
 
 type Node struct {
-	cfg   Config
-	group uint32
-	host  *Host
-	owned bool // Stop also stops the host (single-group Start)
-	sm    StateMachine
-	r     *raft.Raft
-	wal   *wal.WAL
-	tr    *transport
-	xferc chan raft.NodeID
+	cfg    Config
+	group  uint32
+	host   *Host
+	owned  bool // Stop also stops the host (single-group Start)
+	sm     StateMachine
+	r      *raft.Raft
+	wal    *wal.WAL
+	tr     *transport
+	xferc  chan raft.NodeID
+	pausec chan time.Duration
 
 	propc chan *proposal
 	readc chan *readReq
@@ -222,7 +223,7 @@ func (h *Host) StartGroup(group uint32, cfg Config, sm StateMachine) (*Node, err
 	}
 	n := &Node{
 		cfg: cfg, group: group, host: h, tr: h.tr, sm: sm, wal: w,
-		xferc: make(chan raft.NodeID, 1),
+		xferc: make(chan raft.NodeID, 1), pausec: make(chan time.Duration, 1),
 		propc: make(chan *proposal, 1024), readc: make(chan *readReq, 1024),
 		recvc: make(chan raft.Message, 4096),
 		stopc: make(chan struct{}), donec: make(chan struct{}),
@@ -255,6 +256,25 @@ func (h *Host) StartGroup(group uint32, cfg Config, sm StateMachine) (*Node, err
 
 // SetFilter installs a fault-injection filter on the network (tests).
 func (n *Node) SetFilter(f func(from, to raft.NodeID) bool) { n.host.SetFilter(f) }
+
+// Pause simulates a crashed (or frozen) process for d: the node stops ticking and
+// drops all Raft traffic, then resumes from its in-memory state. Used by the demo's
+// "kill the leader" button and fault-injection tests.
+func (n *Node) Pause(d time.Duration) {
+	select {
+	case n.pausec <- d:
+	default:
+	}
+}
+
+// Pause pauses every group on this host.
+func (h *Host) Pause(d time.Duration) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range h.groups {
+		n.Pause(d)
+	}
+}
 
 // TransferLeadership asks this group's leader (if local) to hand off to `to`.
 func (n *Node) TransferLeadership(to raft.NodeID) {
@@ -315,6 +335,20 @@ func (n *Node) run() {
 			n.startProposal(p)
 		case to := <-n.xferc:
 			n.r.TransferLeadership(to)
+		case d := <-n.pausec:
+			log.Printf("raft node %d group %d: paused for %v", n.cfg.Self.ID, n.group, d)
+			timer := time.NewTimer(d)
+		paused:
+			for {
+				select {
+				case <-n.stopc:
+					timer.Stop()
+					break paused
+				case <-n.recvc: // dropped: we are "down"
+				case <-timer.C:
+					break paused
+				}
+			}
 		case rq := <-n.readc:
 			n.nextCtx++
 			if err := n.r.ReadIndex(n.nextCtx); err != nil {

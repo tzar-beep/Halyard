@@ -96,6 +96,19 @@ func (r *Router) Close() {
 	}
 }
 
+// Groups returns the local data groups.
+func (r *Router) Groups() map[uint32]*Group { return r.groups }
+
+// Meta returns the metadata group's node.
+func (r *Router) Meta() *cluster.Node { return r.meta }
+
+// SetUsers configures ACL users on every group.
+func (r *Router) SetUsers(users []command.User) {
+	for _, g := range r.groups {
+		g.Disp.SetUsers(users)
+	}
+}
+
 // Host exposes the network endpoint (fault injection in tests).
 func (r *Router) Host() *cluster.Host { return r.host }
 
@@ -183,8 +196,12 @@ func (r *Router) Dispatch(w *resp.Writer, cs *command.Session, args [][]byte) er
 	}
 	name := strings.ToLower(string(args[0]))
 	any := r.groups[1].Disp
-	if name == "auth" || (r.password != "" && !cs.Authed) {
+	if name == "auth" || (any.AuthRequired() && !cs.Authed) {
 		return any.Dispatch(w, cs, args) // AUTH, or the NOAUTH error
+	}
+	if e := any.Allowed(cs, args); e != "" {
+		w.Error(e)
+		return nil
 	}
 	s := sess(cs)
 	switch name {

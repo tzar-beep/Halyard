@@ -25,7 +25,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/tzar-beep/redis/internal/metrics"
 	"github.com/tzar-beep/redis/internal/raft"
 )
 
@@ -256,7 +258,10 @@ func (w *WAL) Save(hs *raft.HardState, ents []raft.Entry, snap *raft.Snapshot) e
 	if err := w.bw.Flush(); err != nil {
 		return err
 	}
-	return w.f.Sync()
+	t0 := time.Now()
+	err := w.f.Sync()
+	metrics.FsyncLatency.Observe(time.Since(t0))
+	return err
 }
 
 // Compact persists a locally taken snapshot and drops the entries it covers.

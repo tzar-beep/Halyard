@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tzar-beep/redis/internal/metrics"
 	"github.com/tzar-beep/redis/internal/resp"
 )
 
@@ -207,7 +208,9 @@ func (a *AOF) groupCommitLoop() {
 			return
 		}
 		a.mu.Unlock()
+		t0 := time.Now()
 		err := a.f.Sync() // appenders keep buffering meanwhile
+		metrics.FsyncLatency.Observe(time.Since(t0))
 		a.mu.Lock()
 		if err != nil {
 			a.fail(err)
@@ -285,7 +288,10 @@ func (a *AOF) backgroundSync() {
 	}
 	a.dirty = false
 	a.mu.Unlock()
-	if err := a.f.Sync(); err != nil {
+	t0 := time.Now()
+	err := a.f.Sync()
+	metrics.FsyncLatency.Observe(time.Since(t0))
+	if err != nil {
 		a.mu.Lock()
 		a.fail(err)
 		a.mu.Unlock()

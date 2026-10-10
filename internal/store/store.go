@@ -407,6 +407,13 @@ func (s *Store) Restore(e Entry) {
 	}
 }
 
+// Stats returns the number of keys and of keys with a TTL.
+func (s *Store) Stats() (keys, expires int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.data), len(s.expires)
+}
+
 // Len returns the number of keys, including expired ones not yet reclaimed.
 func (s *Store) Len() int {
 	s.mu.RLock()

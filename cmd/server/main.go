@@ -11,7 +11,10 @@ import (
 	"strings"
 	"syscall"
 
+	"bufio"
+
 	"github.com/tzar-beep/redis/internal/cluster"
+	"github.com/tzar-beep/redis/internal/command"
 	"github.com/tzar-beep/redis/internal/persistence"
 	"github.com/tzar-beep/redis/internal/raft"
 	"github.com/tzar-beep/redis/internal/server"
@@ -34,7 +37,31 @@ func main() {
 	flag.IntVar(&cfg.Shards, "shards", 0, "cluster mode: number of Raft data groups to shard the keyspace over (0 = unsharded)")
 	flag.BoolVar(&join, "join", false, "cluster mode: start empty and wait to be added with RAFT ADD")
 	flag.Int64Var(&cfg.AutoSaveBytes, "autosave-bytes", 64<<20, "snapshot and start a new AOF segment once it exceeds this size (0 = off)")
+	flag.StringVar(&cfg.TLSCert, "tls-cert", "", "serve clients over TLS with this certificate (PEM)")
+	flag.StringVar(&cfg.TLSKey, "tls-key", "", "private key for -tls-cert")
+	flag.StringVar(&cfg.HTTPAddr, "http", "", "address for /metrics, /healthz and /api/status (e.g. :8080)")
+	flag.BoolVar(&cfg.Demo, "demo", false, "expose the rate-limited public demo API (/api/command, /api/fault)")
+	flag.StringVar(&cfg.CORSOrigin, "cors", "", "Access-Control-Allow-Origin for the HTTP API")
+	flag.Func("user", "ACL user as name:password:role (role read|write|admin); repeatable", func(v string) error {
+		parts := strings.SplitN(v, ":", 3)
+		if len(parts) != 3 {
+			return fmt.Errorf("want name:password:role")
+		}
+		role, ok := command.ParseRole(parts[2])
+		if !ok || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("bad user %q", parts[0])
+		}
+		cfg.Users = append(cfg.Users, command.User{Name: parts[0], Password: parts[1], Role: role})
+		return nil
+	})
+	configFile := flag.String("config", "", "config file: one 'flag value' per line, # comments; command-line flags override it")
 	flag.Parse()
+	if *configFile != "" {
+		if err := loadConfig(*configFile); err != nil {
+			log.Fatal(err)
+		}
+		flag.Parse() // command-line values take precedence over the file
+	}
 
 	p, err := persistence.ParsePolicy(fsync)
 	if err != nil {
@@ -101,4 +128,32 @@ func clusterConfig(id raft.NodeID, spec, raftAddr, clientAddr string, join bool)
 		return nil, fmt.Errorf("-cluster does not include this node's id %d", id)
 	}
 	return cc, nil
+}
+
+// loadConfig applies a file of "flag value" lines (Redis-style config syntax), e.g.
+//
+//	addr 0.0.0.0:6379
+//	requirepass s3cret
+//	user alice:pw:read
+func loadConfig(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for n := 1; sc.Scan(); n++ {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, _ := strings.Cut(line, " ")
+		if name == "config" {
+			continue
+		}
+		if err := flag.Set(name, strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("%s:%d: %v", path, n, err)
+		}
+	}
+	return sc.Err()
 }

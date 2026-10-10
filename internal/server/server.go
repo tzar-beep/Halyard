@@ -8,8 +8,13 @@ import (
 	"net"
 	"sync"
 
+	"crypto/tls"
+	"net/http"
+	"time"
+
 	"github.com/tzar-beep/redis/internal/cluster"
 	"github.com/tzar-beep/redis/internal/command"
+	"github.com/tzar-beep/redis/internal/metrics"
 	"github.com/tzar-beep/redis/internal/persistence"
 	"github.com/tzar-beep/redis/internal/resp"
 	"github.com/tzar-beep/redis/internal/shard"
@@ -23,6 +28,8 @@ type Handler interface {
 }
 
 type Server struct {
+	cfg    Config
+	http   *http.Server
 	addr   string
 	h      Handler
 	router *shard.Router // non-nil in sharded mode
@@ -53,15 +60,48 @@ type Config struct {
 	// Shards > 0 (with Cluster) runs that many Raft data groups plus a metadata
 	// group, routing keys by hash slot like Redis Cluster.
 	Shards int
+
+	Users      []command.User // ACL users in addition to the requirepass "default" user
+	TLSCert    string         // serve clients over TLS when set (with TLSKey)
+	TLSKey     string
+	HTTPAddr   string // /metrics, /healthz, /api/status
+	Demo       bool   // also expose the public demo API (/api/command, /api/fault)
+	CORSOrigin string // Access-Control-Allow-Origin for the HTTP API
+}
+
+// finish applies settings common to every mode.
+func (s *Server) finish(cfg Config) (*Server, error) {
+	s.cfg = cfg
+	if s.router != nil {
+		s.router.SetUsers(cfg.Users)
+	} else {
+		s.disp.SetUsers(cfg.Users)
+	}
+	s.registerGauges()
+	if cfg.HTTPAddr != "" {
+		if err := s.startHTTP(cfg.HTTPAddr); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // New builds a server, recovering the snapshot and AOF first when persistence is enabled.
 func New(cfg Config) (*Server, error) {
 	if cfg.Cluster != nil && cfg.Shards > 0 {
-		return newSharded(cfg)
+		s, err := newSharded(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return s.finish(cfg)
 	}
 	if cfg.Cluster != nil {
-		return newClustered(cfg)
+		s, err := newClustered(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return s.finish(cfg)
 	}
 	st := store.NewStore()
 	s := &Server{
@@ -83,13 +123,22 @@ func New(cfg Config) (*Server, error) {
 		s.disp.SetPersister(pm)
 	}
 	s.h = s.disp
-	return s, nil
+	return s.finish(cfg)
 }
 
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return err
+	}
+	if s.cfg.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+		log.Printf("TLS enabled")
 	}
 	log.Printf("listening on %s", ln.Addr())
 	return s.Serve(ln)
@@ -127,6 +176,9 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Close stops the listener, closes all client connections and waits for handlers.
 func (s *Server) Close() error {
+	if s.http != nil {
+		s.http.Close()
+	}
 	s.mu.Lock()
 	s.done = true
 	var err error
@@ -162,6 +214,9 @@ func (s *Server) handle(c net.Conn) {
 		s.mu.Unlock()
 		s.wg.Done()
 	}()
+	metrics.ConnectionsCurrent.Add(1)
+	metrics.ConnectionsTotal.Add(1)
+	defer metrics.ConnectionsCurrent.Add(-1)
 	r, w := resp.NewReader(c), resp.NewWriter(c)
 	var sess command.Session
 	defer s.h.CloseSession(&sess)
@@ -170,6 +225,7 @@ func (s *Server) handle(c net.Conn) {
 		if err != nil {
 			var pe *resp.ProtocolError
 			if errors.As(err, &pe) {
+				metrics.ProtocolErrors.Add(1)
 				w.Error("ERR " + pe.Error())
 				w.Flush()
 			} else if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
@@ -177,11 +233,20 @@ func (s *Server) handle(c net.Conn) {
 			}
 			return
 		}
-		if err := s.h.Dispatch(w, &sess, args); err != nil {
+		if len(args) == 0 {
+			continue
+		}
+		t0 := time.Now()
+		name, known := command.Name(args[0])
+		if name == "info" && (sess.Authed || !s.authRequired()) {
+			s.info(w, args)
+		} else if err := s.h.Dispatch(w, &sess, args); err != nil {
 			// Unpersisted write: drop the connection without flushing the reply.
 			log.Printf("conn %s: %v", c.RemoteAddr(), err)
 			return
 		}
+		metrics.CommandLatency.Observe(time.Since(t0))
+		metrics.CountCommand(name, known)
 		// Flush only once the pipeline is drained: batches replies to pipelined requests.
 		if r.Buffered() == 0 {
 			if err := w.Flush(); err != nil {
@@ -254,3 +319,10 @@ func (r replicatedSM) Restore(data []byte) error {
 }
 
 func (r replicatedSM) ExpiredKeys(now int64, n int) []string { return r.st.ExpiredKeys(now, n) }
+
+func (s *Server) authRequired() bool {
+	if s.router != nil {
+		return s.router.Groups()[1].Disp.AuthRequired()
+	}
+	return s.disp.AuthRequired()
+}

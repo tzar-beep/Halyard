@@ -69,7 +69,8 @@ type Ctx struct {
 
 type Dispatcher struct {
 	store    *store.Store
-	password string     // empty disables AUTH
+	password string // empty disables AUTH (unless ACL users are configured)
+	users    map[string]User
 	aof      Persister  // nil disables persistence
 	repl     Replicator // non-nil in cluster mode
 	guard    Guard      // optional slot-ownership check (sharded mode)
@@ -98,6 +99,8 @@ func (d *Dispatcher) Freeze(fn func()) {
 // Session is per-connection state.
 type Session struct {
 	Authed  bool
+	Role    Role
+	User    string
 	Asking  bool // one-shot ASKING flag (sharded mode)
 	Ext     any  // state owned by an outer handler (the shard router)
 	inMulti bool
@@ -168,8 +171,12 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 		d.auth(w, sess, args)
 		return nil
 	}
-	if d.password != "" && !sess.Authed {
+	if d.authRequired() && !sess.Authed {
 		w.Error(errNoAuth)
+		return nil
+	}
+	if e := d.Allowed(sess, args); e != "" {
+		w.Error(e)
 		return nil
 	}
 
@@ -601,16 +608,95 @@ func (d *Dispatcher) auth(w *resp.Writer, sess *Session, args [][]byte) {
 		w.Error(wrongArgs("auth"))
 		return
 	}
-	if d.password == "" {
+	if !d.authRequired() {
 		w.Error("ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?")
 		return
 	}
-	userOK := user == nil || string(user) == "default"
-	passOK := subtle.ConstantTimeCompare(pass, []byte(d.password)) == 1
-	if !userOK || !passOK {
+	name := "default"
+	if user != nil {
+		name = string(user)
+	}
+	var expect string
+	var role Role
+	if u, ok := d.users[name]; ok {
+		expect, role = u.Password, u.Role
+	} else if name == "default" && d.password != "" {
+		expect, role = d.password, RoleAdmin
+	} else {
 		w.Error(errWrongPass)
 		return
 	}
-	sess.Authed = true
+	if subtle.ConstantTimeCompare(pass, []byte(expect)) != 1 {
+		w.Error(errWrongPass)
+		return
+	}
+	sess.Authed, sess.Role, sess.User = true, role, name
 	w.SimpleString("OK")
+}
+
+// Role is an ACL user's permission level.
+type Role uint8
+
+const (
+	RoleNone  Role = iota
+	RoleRead       // read commands only
+	RoleWrite      // read and write commands
+	RoleAdmin      // everything, including SAVE, FLUSHALL, RAFT/CLUSTER administration
+)
+
+func ParseRole(s string) (Role, bool) {
+	r, ok := map[string]Role{"read": RoleRead, "readonly": RoleRead, "write": RoleWrite, "readwrite": RoleWrite, "admin": RoleAdmin}[strings.ToLower(s)]
+	return r, ok
+}
+
+// User is an ACL user. The "default" user is the requirepass password, as admin.
+type User struct {
+	Name     string
+	Password string
+	Role     Role
+}
+
+// SetUsers configures ACL users. Call before serving.
+func (d *Dispatcher) SetUsers(users []User) {
+	d.users = map[string]User{}
+	for _, u := range users {
+		d.users[u.Name] = u
+	}
+}
+
+func (d *Dispatcher) authRequired() bool { return d.password != "" || len(d.users) > 0 }
+
+// AuthRequired reports whether clients must AUTH before running commands.
+func (d *Dispatcher) AuthRequired() bool { return d.authRequired() }
+
+// adminOnly commands need RoleAdmin regardless of their kind.
+var adminOnly = map[string]bool{"flushall": true, "raft": true, "cluster": true, "save": true, "bgsave": true}
+
+// Allowed returns the NOPERM error for a command the session's user may not run,
+// or "". Connection and transaction commands are always allowed.
+func (d *Dispatcher) Allowed(sess *Session, args [][]byte) string {
+	if !d.authRequired() || sess.Role == RoleAdmin || len(args) == 0 {
+		return ""
+	}
+	name := cmdName(args[0])
+	need := RoleRead
+	switch {
+	case adminOnly[name] || strings.HasPrefix(name, "shard."):
+		need = RoleAdmin
+	default:
+		if h, ok := table[name]; ok && h.kind == write {
+			need = RoleWrite
+		}
+	}
+	if sess.Role >= need {
+		return ""
+	}
+	return fmt.Sprintf("NOPERM User %s has no permissions to run the '%s' command", sess.User, name)
+}
+
+// Name returns the lowercase command name and whether it is a known command.
+func Name(b []byte) (string, bool) {
+	n := cmdName(b)
+	_, ok := names[n]
+	return n, ok
 }
