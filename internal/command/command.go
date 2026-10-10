@@ -69,6 +69,7 @@ type Dispatcher struct {
 	password string     // empty disables AUTH
 	aof      Persister  // nil disables persistence
 	repl     Replicator // non-nil in cluster mode
+	guard    Guard      // optional slot-ownership check (sharded mode)
 	wmu      sync.Mutex
 
 	replayBuf bytes.Buffer
@@ -94,6 +95,8 @@ func (d *Dispatcher) Freeze(fn func()) {
 // Session is per-connection state.
 type Session struct {
 	Authed  bool
+	Asking  bool // one-shot ASKING flag (sharded mode)
+	Ext     any  // state owned by an outer handler (the shard router)
 	inMulti bool
 	txErr   bool // a command failed to queue; EXEC must abort
 	queued  [][][]byte
@@ -205,7 +208,9 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 		return nil
 	}
 	if d.repl != nil {
-		d.dispatchCluster(w, h, name, args)
+		asking := sess.Asking
+		sess.Asking = false
+		d.dispatchCluster(w, h, name, args, asking)
 		return nil
 	}
 
@@ -264,7 +269,7 @@ func (d *Dispatcher) exec(w *resp.Writer, sess *Session) error {
 			w.ArrayHeader(0)
 			return nil
 		}
-		d.propose(w, encodeTxn(sess.queued))
+		d.propose(w, encodeTxn(sess.queued), false)
 		return nil
 	}
 	if d.aof != nil {

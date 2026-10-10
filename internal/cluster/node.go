@@ -97,11 +97,15 @@ type Status struct {
 }
 
 type Node struct {
-	cfg Config
-	sm  StateMachine
-	r   *raft.Raft
-	wal *wal.WAL
-	tr  *transport
+	cfg   Config
+	group uint32
+	host  *Host
+	owned bool // Stop also stops the host (single-group Start)
+	sm    StateMachine
+	r     *raft.Raft
+	wal   *wal.WAL
+	tr    *transport
+	xferc chan raft.NodeID
 
 	propc chan *proposal
 	readc chan *readReq
@@ -128,8 +132,74 @@ var (
 	errTimeout = errors.New("ERR timeout waiting for consensus; the write may or may not have been applied")
 )
 
-// Start recovers the node from its WAL and starts it.
+// Host owns the network endpoint shared by all Raft groups in this process.
+type Host struct {
+	self   Peer
+	tr     *transport
+	mu     sync.RWMutex
+	groups map[uint32]*Node
+}
+
+// StartHost listens for Raft traffic on self.RaftAddr.
+func StartHost(self Peer, secret string) (*Host, error) {
+	h := &Host{self: self, groups: map[uint32]*Node{}}
+	tr, err := newTransport(self.ID, self.RaftAddr, secret, h.recv)
+	if err != nil {
+		return nil, err
+	}
+	h.tr = tr
+	return h, nil
+}
+
+func (h *Host) recv(group uint32, m raft.Message) {
+	h.mu.RLock()
+	n := h.groups[group]
+	h.mu.RUnlock()
+	if n != nil {
+		n.receive(m)
+	}
+}
+
+// SetFilter installs a fault-injection filter for all groups (tests).
+func (h *Host) SetFilter(f func(from, to raft.NodeID) bool) {
+	if f == nil {
+		h.tr.filter.Store(nil)
+	} else {
+		h.tr.filter.Store(&f)
+	}
+}
+
+// Stop stops every group and the transport.
+func (h *Host) Stop() {
+	h.mu.RLock()
+	nodes := make([]*Node, 0, len(h.groups))
+	for _, n := range h.groups {
+		nodes = append(nodes, n)
+	}
+	h.mu.RUnlock()
+	for _, n := range nodes {
+		n.stopGroup()
+	}
+	h.tr.close()
+}
+
+// Start runs a single Raft group with its own host.
 func Start(cfg Config, sm StateMachine) (*Node, error) {
+	h, err := StartHost(cfg.Self, cfg.Secret)
+	if err != nil {
+		return nil, err
+	}
+	n, err := h.StartGroup(0, cfg, sm)
+	if err != nil {
+		h.tr.close()
+		return nil, err
+	}
+	n.owned = true
+	return n, nil
+}
+
+// StartGroup recovers Raft group `group` from cfg.Dir and starts it on this host.
+func (h *Host) StartGroup(group uint32, cfg Config, sm StateMachine) (*Node, error) {
 	if cfg.Tick == 0 {
 		cfg.Tick = 100 * time.Millisecond
 	}
@@ -147,7 +217,8 @@ func Start(cfg Config, sm StateMachine) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{
-		cfg: cfg, sm: sm, wal: w,
+		cfg: cfg, group: group, host: h, tr: h.tr, sm: sm, wal: w,
+		xferc: make(chan raft.NodeID, 1),
 		propc: make(chan *proposal, 1024), readc: make(chan *readReq, 1024),
 		recvc: make(chan raft.Message, 4096),
 		stopc: make(chan struct{}), donec: make(chan struct{}),
@@ -167,11 +238,9 @@ func Start(cfg Config, sm StateMachine) (*Node, error) {
 		rc.PeerContexts[p.ID] = p.context()
 	}
 	n.r = raft.New(rc, persisted)
-	n.tr, err = newTransport(cfg.Self.ID, cfg.Self.RaftAddr, cfg.Secret, n.receive)
-	if err != nil {
-		w.Close()
-		return nil, err
-	}
+	h.mu.Lock()
+	h.groups[group] = n
+	h.mu.Unlock()
 	for id, p := range n.peers {
 		n.tr.setPeer(id, p.RaftAddr)
 	}
@@ -181,11 +250,13 @@ func Start(cfg Config, sm StateMachine) (*Node, error) {
 }
 
 // SetFilter installs a fault-injection filter on the network (tests).
-func (n *Node) SetFilter(f func(from, to raft.NodeID) bool) {
-	if f == nil {
-		n.tr.filter.Store(nil)
-	} else {
-		n.tr.filter.Store(&f)
+func (n *Node) SetFilter(f func(from, to raft.NodeID) bool) { n.host.SetFilter(f) }
+
+// TransferLeadership asks this group's leader (if local) to hand off to `to`.
+func (n *Node) TransferLeadership(to raft.NodeID) {
+	select {
+	case n.xferc <- to:
+	default:
 	}
 }
 
@@ -196,8 +267,16 @@ func (n *Node) receive(m raft.Message) {
 	}
 }
 
-// Stop shuts the node down and closes its WAL.
+// Stop shuts the node down (and its host, if it owns one).
 func (n *Node) Stop() {
+	if n.owned {
+		n.host.Stop()
+		return
+	}
+	n.stopGroup()
+}
+
+func (n *Node) stopGroup() {
 	select {
 	case <-n.stopc:
 		return
@@ -205,8 +284,10 @@ func (n *Node) Stop() {
 		close(n.stopc)
 	}
 	<-n.donec
-	n.tr.close()
 	n.wal.Close()
+	n.host.mu.Lock()
+	delete(n.host.groups, n.group)
+	n.host.mu.Unlock()
 }
 
 func (n *Node) run() {
@@ -228,6 +309,8 @@ func (n *Node) run() {
 			n.r.Step(m)
 		case p := <-n.propc:
 			n.startProposal(p)
+		case to := <-n.xferc:
+			n.r.TransferLeadership(to)
 		case rq := <-n.readc:
 			n.nextCtx++
 			if err := n.r.ReadIndex(n.nextCtx); err != nil {
@@ -236,6 +319,7 @@ func (n *Node) run() {
 				n.reads[n.nextCtx] = rq
 			}
 		}
+		n.drain()
 		for n.r.HasReady() {
 			if err := n.handleReady(n.r.Ready()); err != nil {
 				// Losing durability is not survivable: stop rather than risk
@@ -255,6 +339,21 @@ func (n *Node) run() {
 	}
 }
 
+// drain takes every proposal and message already waiting, so that one Ready (one
+// fsync, one network flush per peer) covers all of them: group commit.
+func (n *Node) drain() {
+	for i := 0; i < 1024; i++ {
+		select {
+		case p := <-n.propc:
+			n.startProposal(p)
+		case m := <-n.recvc:
+			n.r.Step(m)
+		default:
+			return
+		}
+	}
+}
+
 func (n *Node) startProposal(p *proposal) {
 	var idx, term uint64
 	var err error
@@ -267,6 +366,8 @@ func (n *Node) startProposal(p *proposal) {
 	switch {
 	case errors.Is(err, raft.ErrNotLeader):
 		p.done <- result{err: n.redirect()}
+	case errors.Is(err, raft.ErrTransfering):
+		p.done <- result{err: errors.New("TRYAGAIN leadership transfer in progress")}
 	case err != nil:
 		p.done <- result{err: fmt.Errorf("ERR %v", err)}
 	default:
@@ -295,7 +396,7 @@ func (n *Node) handleReady(rd raft.Ready) error {
 	if err := n.wal.Save(hs, rd.Entries, rd.Snapshot); err != nil {
 		return err
 	}
-	n.tr.send(rd.Messages)
+	n.tr.send(n.group, rd.Messages)
 	if rd.Snapshot != nil {
 		if err := n.restoreSnapshot(rd.Snapshot); err != nil {
 			return err

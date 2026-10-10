@@ -12,15 +12,24 @@ import (
 	"github.com/tzar-beep/redis/internal/command"
 	"github.com/tzar-beep/redis/internal/persistence"
 	"github.com/tzar-beep/redis/internal/resp"
+	"github.com/tzar-beep/redis/internal/shard"
 	"github.com/tzar-beep/redis/internal/store"
 )
 
+// Handler executes client commands for one connection's session.
+type Handler interface {
+	Dispatch(w *resp.Writer, sess *command.Session, args [][]byte) error
+	CloseSession(sess *command.Session)
+}
+
 type Server struct {
-	addr  string
-	store *store.Store
-	disp  *command.Dispatcher
-	pm    *persistence.Manager // nil when persistence is disabled
-	node  *cluster.Node        // non-nil in cluster mode
+	addr   string
+	h      Handler
+	router *shard.Router // non-nil in sharded mode
+	store  *store.Store
+	disp   *command.Dispatcher
+	pm     *persistence.Manager // nil when persistence is disabled
+	node   *cluster.Node        // non-nil in cluster mode
 
 	mu    sync.Mutex
 	ln    net.Listener
@@ -41,10 +50,16 @@ type Config struct {
 	// Cluster, if set, replicates all writes through Raft. AOF/snapshot settings
 	// are then ignored: the Raft WAL and snapshots provide durability.
 	Cluster *cluster.Config
+	// Shards > 0 (with Cluster) runs that many Raft data groups plus a metadata
+	// group, routing keys by hash slot like Redis Cluster.
+	Shards int
 }
 
 // New builds a server, recovering the snapshot and AOF first when persistence is enabled.
 func New(cfg Config) (*Server, error) {
+	if cfg.Cluster != nil && cfg.Shards > 0 {
+		return newSharded(cfg)
+	}
 	if cfg.Cluster != nil {
 		return newClustered(cfg)
 	}
@@ -67,6 +82,7 @@ func New(cfg Config) (*Server, error) {
 		s.pm = pm
 		s.disp.SetPersister(pm)
 	}
+	s.h = s.disp
 	return s, nil
 }
 
@@ -122,6 +138,10 @@ func (s *Server) Close() error {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+	if s.router != nil {
+		s.router.Close()
+		return err
+	}
 	s.store.Close()
 	if s.node != nil {
 		s.node.Stop()
@@ -144,7 +164,7 @@ func (s *Server) handle(c net.Conn) {
 	}()
 	r, w := resp.NewReader(c), resp.NewWriter(c)
 	var sess command.Session
-	defer s.disp.CloseSession(&sess)
+	defer s.h.CloseSession(&sess)
 	for {
 		args, err := r.ReadCommand()
 		if err != nil {
@@ -157,7 +177,7 @@ func (s *Server) handle(c net.Conn) {
 			}
 			return
 		}
-		if err := s.disp.Dispatch(w, &sess, args); err != nil {
+		if err := s.h.Dispatch(w, &sess, args); err != nil {
 			// Unpersisted write: drop the connection without flushing the reply.
 			log.Printf("conn %s: %v", c.RemoteAddr(), err)
 			return
@@ -190,8 +210,22 @@ func newClustered(cfg Config) (*Server, error) {
 	}
 	s.node = node
 	s.disp.SetReplicator(node)
+	s.h = s.disp
 	return s, nil
 }
+
+func newSharded(cfg Config) (*Server, error) {
+	c := cfg.Cluster
+	r, err := shard.Start(shard.Config{Self: c.Self, Peers: c.Peers, Dir: c.Dir, Groups: cfg.Shards,
+		Password: cfg.Password, Tick: c.Tick, SnapshotEntries: c.SnapshotEntries})
+	if err != nil {
+		return nil, err
+	}
+	return &Server{addr: cfg.Addr, h: r, router: r, conns: map[net.Conn]struct{}{}}, nil
+}
+
+// Router returns the shard router in sharded mode (nil otherwise).
+func (s *Server) Router() *shard.Router { return s.router }
 
 // Node returns the Raft node in cluster mode (nil otherwise).
 func (s *Server) Node() *cluster.Node { return s.node }

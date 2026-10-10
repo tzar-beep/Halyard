@@ -31,6 +31,7 @@ func main() {
 	flag.Uint64Var(&nodeID, "id", 0, "cluster mode: this node's id (>0)")
 	flag.StringVar(&clusterSpec, "cluster", "", "cluster mode: founding members as id=raft-addr/client-addr,... (include this node)")
 	flag.StringVar(&raftAddr, "raft-addr", "", "cluster mode: address for Raft traffic (required with -join)")
+	flag.IntVar(&cfg.Shards, "shards", 0, "cluster mode: number of Raft data groups to shard the keyspace over (0 = unsharded)")
 	flag.BoolVar(&join, "join", false, "cluster mode: start empty and wait to be added with RAFT ADD")
 	flag.Int64Var(&cfg.AutoSaveBytes, "autosave-bytes", 64<<20, "snapshot and start a new AOF segment once it exceeds this size (0 = off)")
 	flag.Parse()

@@ -19,7 +19,8 @@ import (
 // fed by a bounded queue; when the queue is full or the peer is down, messages are
 // dropped — Raft retransmits, so loss only costs latency.
 //
-// Framing: [u32 length][payload]. A connection opens with a handshake frame
+// Framing: [u32 length][payload]; message payloads are [u32 group][message], so
+// one connection per peer carries every Raft group (multi-Raft). A connection opens with a handshake frame
 // (sender id, sender's Raft address, cluster secret). The receiver verifies the
 // secret in constant time and learns a return route to the sender, which lets a
 // freshly added node answer the leader before it knows the membership.
@@ -28,7 +29,7 @@ type transport struct {
 	addr   string // our advertised Raft address, sent in the handshake
 	secret []byte
 	ln     net.Listener
-	recv   func(raft.Message)
+	recv   func(group uint32, m raft.Message)
 
 	mu    sync.Mutex
 	peers map[raft.NodeID]*peerConn
@@ -45,7 +46,7 @@ const (
 	queueDepth = 4096
 )
 
-func newTransport(id raft.NodeID, addr, secret string, recv func(raft.Message)) (*transport, error) {
+func newTransport(id raft.NodeID, addr, secret string, recv func(uint32, raft.Message)) (*transport, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -91,7 +92,7 @@ func (t *transport) removePeer(id raft.NodeID) {
 	}
 }
 
-func (t *transport) send(msgs []raft.Message) {
+func (t *transport) send(group uint32, msgs []raft.Message) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, m := range msgs {
@@ -100,7 +101,7 @@ func (t *transport) send(msgs []raft.Message) {
 			continue
 		}
 		select {
-		case pc.q <- m.Marshal():
+		case pc.q <- append(binary.BigEndian.AppendUint32(nil, group), m.Marshal()...):
 		default: // queue full: drop
 		}
 	}
@@ -163,13 +164,16 @@ func (t *transport) serveConn(c net.Conn) {
 		if err != nil {
 			return
 		}
-		m, err := raft.UnmarshalMessage(b)
+		if len(b) < 4 {
+			return
+		}
+		m, err := raft.UnmarshalMessage(b[4:])
 		if err != nil || m.From != from || m.To != t.id {
 			log.Printf("raft transport: bad message from %d: %v", from, err)
 			return
 		}
 		if t.allowed(m.From, m.To) {
-			t.recv(m)
+			t.recv(binary.BigEndian.Uint32(b), m)
 		}
 	}
 }

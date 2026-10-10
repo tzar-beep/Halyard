@@ -784,8 +784,8 @@ func (r *Raft) TransferLeadership(to NodeID) error {
 		return ErrNotLeader
 	}
 	pr := r.prs[to]
-	if to == r.id || pr == nil {
-		return nil
+	if to == r.id || pr == nil || !pr.recentActive {
+		return nil // only hand off to a peer that is up
 	}
 	r.leadTransferee = to
 	r.electionElapsed = 0

@@ -27,10 +27,41 @@ type Replicator interface {
 // SetReplicator switches the dispatcher to cluster mode. Call before serving.
 func (d *Dispatcher) SetReplicator(r Replicator) { d.repl = r }
 
+// Guard decides, inside the transaction that would execute a command, whether this
+// replica group may execute it; it returns an error reply (e.g. "MOVED ...") or "".
+type Guard func(tx *store.Tx, args [][]byte, asking bool) string
+
+// SetGuard installs a guard (sharded mode). Call before serving.
+func (d *Dispatcher) SetGuard(g Guard) { d.guard = g }
+
+// Validate returns the error reply for an unknown command or wrong arity, or "".
+func Validate(args [][]byte) string {
+	h, ok := table[strings.ToLower(string(args[0]))]
+	if !ok {
+		return "ERR unknown command '" + string(args[0]) + "', with args beginning with: " + quoteArgs(args[1:])
+	}
+	if !arityOK(h, args) {
+		return wrongArgs(strings.ToLower(string(args[0])))
+	}
+	if h.kind == admin {
+		return "ERR Command not allowed inside a transaction"
+	}
+	return ""
+}
+
+// ExecQueued replicates a transaction (sharded mode routes MULTI/EXEC itself).
+func (d *Dispatcher) ExecQueued(w *resp.Writer, queued [][][]byte, asking bool) {
+	if len(queued) == 0 {
+		w.ArrayHeader(0)
+		return
+	}
+	d.propose(w, encodeTxn(queued), asking)
+}
+
 // dispatchCluster runs a command in cluster mode. Writes (and whole transactions)
 // go through the log and execute on every replica when applied; reads are served
 // locally after a ReadIndex barrier.
-func (d *Dispatcher) dispatchCluster(w *resp.Writer, h handler, name string, args [][]byte) {
+func (d *Dispatcher) dispatchCluster(w *resp.Writer, h handler, name string, args [][]byte, asking bool) {
 	switch {
 	case h.kind == admin && name != "ping" && name != "echo":
 		w.Error("ERR " + name + " is not supported in cluster mode (snapshots are managed by Raft)")
@@ -41,13 +72,26 @@ func (d *Dispatcher) dispatchCluster(w *resp.Writer, h handler, name string, arg
 			w.Error(err.Error())
 			return
 		}
-		d.store.View(func(tx *store.Tx) { h.fn(&Ctx{d: d, tx: tx, w: w, args: args}) })
+		d.store.View(func(tx *store.Tx) {
+			if d.guard != nil {
+				if e := d.guard(tx, args, asking); e != "" {
+					w.Error(e)
+					return
+				}
+			}
+			h.fn(&Ctx{d: d, tx: tx, w: w, args: args})
+		})
 	default:
-		d.propose(w, cloneArgs(args))
+		d.propose(w, cloneArgs(args), asking)
 	}
 }
 
-func (d *Dispatcher) propose(w *resp.Writer, args [][]byte) {
+var askingTag = []byte("ASKING")
+
+func (d *Dispatcher) propose(w *resp.Writer, args [][]byte, asking bool) {
+	if asking {
+		args = append([][]byte{askingTag}, args...)
+	}
 	reply, err := d.repl.Propose(args)
 	if err != nil {
 		w.Error(err.Error())
@@ -62,6 +106,10 @@ func (d *Dispatcher) propose(w *resp.Writer, args [][]byte) {
 func (d *Dispatcher) ApplyCommand(now int64, args [][]byte) []byte {
 	var buf bytes.Buffer
 	w := resp.NewWriter(&buf)
+	asking := false
+	if len(args) > 1 && strings.EqualFold(string(args[0]), "asking") {
+		asking, args = true, args[1:]
+	}
 	recs, txn := [][][]byte{args}, false
 	if len(args) > 0 && strings.EqualFold(string(args[0]), "txn") {
 		var err error
@@ -73,6 +121,14 @@ func (d *Dispatcher) ApplyCommand(now int64, args [][]byte) []byte {
 		txn = true
 	}
 	d.store.UpdateAt(now, func(tx *store.Tx) {
+		if d.guard != nil {
+			for _, r := range recs {
+				if e := d.guard(tx, r, asking); e != "" {
+					w.Error(e) // the whole transaction is refused
+					return
+				}
+			}
+		}
 		if txn {
 			w.ArrayHeader(len(recs))
 		}
