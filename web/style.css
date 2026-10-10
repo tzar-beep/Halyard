@@ -352,8 +352,3 @@ tbody tr:hover td { background: rgba(255, 255, 255, 0.015); }
 }
 
 .logo-mark { display: block; border-radius: 5px; }
-
-.offline { background: #1c1714; border-bottom: 1px solid rgba(210, 153, 34, .35); }
-.offline-inner { padding-top: 12px; padding-bottom: 12px; font-size: 13.5px; color: var(--text-2); }
-.offline b { color: var(--warn); font-weight: 500; }
-.offline a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }

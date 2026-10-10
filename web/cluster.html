@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=11">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <script src="config.js?v=3"></script>
 </head>
@@ -34,14 +34,6 @@
       <div class="status" id="status"><span class="sdot"></span><span id="status-text">Connecting</span></div>
     </div>
   </header>
-
-  <div class="offline" id="offline" hidden>
-    <div class="wrap offline-inner">
-      <span><b>The live cluster isn't reachable right now.</b> This page drives a real 3-node deployment over HTTP. Meanwhile,
-        the <a href="/#playground">Raft playground</a> runs the same consensus code in your browser, or start a cluster locally:
-        <code>docker compose -f deploy/docker-compose.cluster.yml up -d</code></span>
-    </div>
-  </div>
 
   <main class="wrap">
     <section id="overview" class="block">
@@ -198,7 +190,7 @@
   </footer>
 
   <script src="topo.js?v=6"></script>
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=6"></script>
   <div class="tour" id="tour" hidden>
     <div class="tour-card" role="dialog" aria-live="polite">
       <div class="tour-step" id="tour-step"></div>
