@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"syscall/js"
 
-	"github.com/tzar-beep/redis/internal/playground"
+	"github.com/tzar-beep/Halyard/internal/playground"
 )
 
 var sim *playground.Sim

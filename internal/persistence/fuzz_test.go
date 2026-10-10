@@ -3,7 +3,7 @@ package persistence
 import (
 	"testing"
 
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 // FuzzDecodeSnapshot: arbitrary bytes must never panic or allocate without bound,

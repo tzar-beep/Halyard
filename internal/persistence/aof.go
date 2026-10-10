@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/metrics"
-	"github.com/tzar-beep/redis/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/metrics"
+	"github.com/tzar-beep/Halyard/internal/resp"
 )
 
 type Policy int

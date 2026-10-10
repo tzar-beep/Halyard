@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 func start(t *testing.T) string { return startWith(t, server.Config{}) }

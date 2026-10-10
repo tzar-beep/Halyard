@@ -13,11 +13,11 @@ import (
 
 	"bufio"
 
-	"github.com/tzar-beep/redis/internal/cluster"
-	"github.com/tzar-beep/redis/internal/command"
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/raft"
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/cluster"
+	"github.com/tzar-beep/Halyard/internal/command"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 func main() {

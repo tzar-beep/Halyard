@@ -19,8 +19,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tzar-beep/redis/internal/resp"
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 const (

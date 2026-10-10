@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 
-	"github.com/tzar-beep/redis/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/raft"
 )
 
 const (

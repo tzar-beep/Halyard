@@ -26,8 +26,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/raft"
-	"github.com/tzar-beep/redis/internal/raft/wal"
+	"github.com/tzar-beep/Halyard/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/raft/wal"
 )
 
 // Peer describes a cluster member.

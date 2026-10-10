@@ -1,6 +1,6 @@
 package command
 
-import "github.com/tzar-beep/redis/internal/store"
+import "github.com/tzar-beep/Halyard/internal/store"
 
 var setCmds = map[string]handler{
 	"sismember": {3, read, sismember},

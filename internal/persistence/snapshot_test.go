@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 func readAll(t *testing.T, path string) (uint64, map[string]store.Entry, error) {

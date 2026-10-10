@@ -11,9 +11,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tzar-beep/redis/internal/command"
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/command"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 // Slot states inside a data group. They are part of the group's replicated state,

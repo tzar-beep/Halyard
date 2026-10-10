@@ -5,7 +5,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 var hashCmds = map[string]handler{

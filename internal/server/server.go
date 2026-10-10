@@ -12,13 +12,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/cluster"
-	"github.com/tzar-beep/redis/internal/command"
-	"github.com/tzar-beep/redis/internal/metrics"
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/resp"
-	"github.com/tzar-beep/redis/internal/shard"
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/cluster"
+	"github.com/tzar-beep/Halyard/internal/command"
+	"github.com/tzar-beep/Halyard/internal/metrics"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/shard"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 // Handler executes client commands for one connection's session.

@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/cluster"
-	"github.com/tzar-beep/redis/internal/command"
-	"github.com/tzar-beep/redis/internal/raft"
-	"github.com/tzar-beep/redis/internal/resp"
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/cluster"
+	"github.com/tzar-beep/Halyard/internal/command"
+	"github.com/tzar-beep/Halyard/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 // Group is one local data-group replica.

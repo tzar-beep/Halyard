@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 func start(b *testing.B, cfg server.Config) string {

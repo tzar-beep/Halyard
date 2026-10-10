@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/raft"
 )
 
 // transport carries Raft messages over TCP. Each peer gets one outbound connection

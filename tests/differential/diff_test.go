@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 func TestDifferential(t *testing.T) {

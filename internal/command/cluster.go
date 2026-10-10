@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tzar-beep/redis/internal/resp"
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 // Replicator replicates commands through consensus (implemented by cluster.Node).

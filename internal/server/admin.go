@@ -16,11 +16,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/cluster"
-	"github.com/tzar-beep/redis/internal/command"
-	"github.com/tzar-beep/redis/internal/metrics"
-	"github.com/tzar-beep/redis/internal/raft"
-	"github.com/tzar-beep/redis/internal/resp"
+	"github.com/tzar-beep/Halyard/internal/cluster"
+	"github.com/tzar-beep/Halyard/internal/command"
+	"github.com/tzar-beep/Halyard/internal/metrics"
+	"github.com/tzar-beep/Halyard/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/resp"
 )
 
 const Version = "1.0.0"

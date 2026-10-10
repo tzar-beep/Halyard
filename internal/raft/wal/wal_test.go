@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tzar-beep/redis/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/raft"
 )
 
 func ents(term uint64, from, to uint64) []raft.Entry {

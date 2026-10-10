@@ -27,8 +27,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/metrics"
-	"github.com/tzar-beep/redis/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/metrics"
+	"github.com/tzar-beep/Halyard/internal/raft"
 )
 
 const (

@@ -3,8 +3,8 @@ package integration
 import (
 	"testing"
 
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 func TestTypesAndTransactions(t *testing.T) {

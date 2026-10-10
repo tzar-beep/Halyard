@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/persistence"
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/persistence"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 // startServer runs an in-process server and returns its address and a stop func.

@@ -3,7 +3,7 @@ package command
 import (
 	"bytes"
 
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 var listCmds = map[string]handler{

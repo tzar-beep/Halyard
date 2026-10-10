@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/cluster"
-	"github.com/tzar-beep/redis/internal/raft"
-	"github.com/tzar-beep/redis/internal/server"
+	"github.com/tzar-beep/Halyard/internal/cluster"
+	"github.com/tzar-beep/Halyard/internal/raft"
+	"github.com/tzar-beep/Halyard/internal/server"
 )
 
 const tick = 20 * time.Millisecond // election timeout 200-400ms

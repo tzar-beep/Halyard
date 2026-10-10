@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tzar-beep/redis/internal/store"
+	"github.com/tzar-beep/Halyard/internal/store"
 )
 
 var stringCmds = map[string]handler{
