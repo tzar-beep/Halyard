@@ -6,8 +6,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/tzar-beep/redis/internal/command"
@@ -20,7 +18,7 @@ type Server struct {
 	addr  string
 	store *store.Store
 	disp  *command.Dispatcher
-	aof   *persistence.AOF // nil when persistence is disabled
+	pm    *persistence.Manager // nil when persistence is disabled
 
 	mu    sync.Mutex
 	ln    net.Listener
@@ -35,11 +33,12 @@ type Config struct {
 	Dir         string // data directory
 	AppendOnly  bool
 	AppendFsync persistence.Policy
+	// AutoSaveBytes snapshots and starts a new AOF segment when the current one
+	// exceeds this size. 0 disables.
+	AutoSaveBytes int64
 }
 
-const aofName = "appendonly.aof"
-
-// New builds a server, replaying the AOF first when persistence is enabled.
+// New builds a server, recovering the snapshot and AOF first when persistence is enabled.
 func New(cfg Config) (*Server, error) {
 	st := store.New()
 	s := &Server{
@@ -49,17 +48,16 @@ func New(cfg Config) (*Server, error) {
 		conns: map[net.Conn]struct{}{},
 	}
 	if cfg.AppendOnly {
-		if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
-			st.Close()
-			return nil, err
-		}
-		aof, err := persistence.Open(filepath.Join(cfg.Dir, aofName), cfg.AppendFsync, s.disp.Apply)
+		pm, err := persistence.Open(
+			persistence.Options{Dir: cfg.Dir, Policy: cfg.AppendFsync, AutoSaveBytes: cfg.AutoSaveBytes},
+			persistence.Hooks{Restore: st.Restore, Apply: s.disp.Apply, Capture: st.Snapshot, Freeze: s.disp.Freeze},
+		)
 		if err != nil {
 			st.Close()
 			return nil, err
 		}
-		s.aof = aof
-		s.disp.SetAppender(aof)
+		s.pm = pm
+		s.disp.SetPersister(pm)
 	}
 	return s, nil
 }
@@ -117,8 +115,8 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.store.Close()
-	if s.aof != nil {
-		if aerr := s.aof.Close(); err == nil {
+	if s.pm != nil {
+		if aerr := s.pm.Close(); err == nil {
 			err = aerr
 		}
 	}

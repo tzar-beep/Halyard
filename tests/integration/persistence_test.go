@@ -77,7 +77,7 @@ func TestRestartRecovery(t *testing.T) {
 
 func TestCorruptAOFRefusesStart(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "appendonly.aof"), []byte(cmd("SET", "a", "1")+"garbage\r\n"+cmd("SET", "b", "2")), 0o644)
+	os.WriteFile(filepath.Join(dir, "appendonly.1.aof"), []byte(cmd("SET", "a", "1")+"garbage\r\n"+cmd("SET", "b", "2")), 0o644)
 	if _, err := server.New(server.Config{Dir: dir, AppendOnly: true}); err == nil {
 		t.Fatal("server started on a corrupt AOF")
 	}
@@ -86,7 +86,7 @@ func TestCorruptAOFRefusesStart(t *testing.T) {
 func TestTruncatedAOFRecovers(t *testing.T) {
 	dir := t.TempDir()
 	full := cmd("SET", "b", "2")
-	os.WriteFile(filepath.Join(dir, "appendonly.aof"), []byte(cmd("SET", "a", "1")+full[:len(full)-3]), 0o644)
+	os.WriteFile(filepath.Join(dir, "appendonly.1.aof"), []byte(cmd("SET", "a", "1")+full[:len(full)-3]), 0o644)
 	addr, _ := startServer(t, server.Config{Dir: dir, AppendOnly: true})
 	c, r := dial(t, addr)
 	roundtrip(t, c, r, cmd("MGET", "a", "b"), "*2\r\n$1\r\n1\r\n$-1\r\n")
@@ -184,4 +184,26 @@ func spawn(t *testing.T, bin, dir string) (string, *exec.Cmd) {
 	}
 	t.Fatal("server did not start")
 	return "", nil
+}
+
+func TestSnapshotCommandsAndRestart(t *testing.T) {
+	cfg := server.Config{Dir: t.TempDir(), AppendOnly: true, AutoSaveBytes: 4096}
+	addr, stop := startServer(t, cfg)
+	c, r := dial(t, addr)
+	for i := 0; i < 500; i++ { // crosses the autosave threshold several times
+		roundtrip(t, c, r, cmd("SET", fmt.Sprintf("k%d", i%100), fmt.Sprint(i)), "+OK\r\n")
+	}
+	roundtrip(t, c, r, cmd("SAVE"), "+OK\r\n")
+	roundtrip(t, c, r, cmd("SET", "after", "save", "EX", "1000"), "+OK\r\n")
+	roundtrip(t, c, r, cmd("BGSAVE"), "+Background saving started\r\n")
+	roundtrip(t, c, r, cmd("DEL", "k0"), ":1\r\n")
+	c.Close()
+	stop()
+
+	addr, _ = startServer(t, cfg)
+	c, r = dial(t, addr)
+	roundtrip(t, c, r, cmd("DBSIZE"), ":100\r\n")
+	roundtrip(t, c, r, cmd("GET", "k99"), "$3\r\n499\r\n")
+	roundtrip(t, c, r, cmd("EXISTS", "k0"), ":0\r\n")
+	roundtrip(t, c, r, cmd("TTL", "after"), ":1000\r\n")
 }

@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func collect(t *testing.T, path string) ([]string, error) {
+func collect(t *testing.T, path string, repair bool) ([]string, error) {
 	t.Helper()
 	var got []string
-	err := Replay(path, func(args [][]byte) error {
+	err := Replay(path, repair, func(args [][]byte) error {
 		var parts []string
 		for _, a := range args {
 			parts = append(parts, string(a))
@@ -33,7 +33,7 @@ func rec(s ...string) [][]byte {
 func TestAppendAndReplay(t *testing.T) {
 	for _, p := range []Policy{Always, EverySec, No} {
 		path := filepath.Join(t.TempDir(), "a.aof")
-		a, err := Open(path, p, func([][]byte) error { return nil })
+		a, err := OpenAOF(path, p)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -42,32 +42,34 @@ func TestAppendAndReplay(t *testing.T) {
 		if err := a.Close(); err != nil {
 			t.Fatal(err)
 		}
-		got, err := collect(t, path)
+		got, err := collect(t, path, false)
 		if err != nil || len(got) != 2 || got[0] != "SET k v\r\nwith\x00binary" || got[1] != "DEL k" {
 			t.Fatalf("policy %d: got %q, %v", p, got, err)
 		}
 	}
 }
 
-func TestTruncatedTailRepaired(t *testing.T) {
+func TestTruncatedTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.aof")
 	good := "*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n"
 	os.WriteFile(path, []byte(good+"*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$1"), 0o644)
-	got, err := collect(t, path)
+	if _, err := collect(t, path, false); err == nil {
+		t.Fatal("truncation accepted in non-final segment")
+	}
+	got, err := collect(t, path, true)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("got %q, %v", got, err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != good {
 		t.Fatalf("file not truncated to last good record: %q", b)
 	}
-	// Appending after repair yields a valid log.
-	a, err := Open(path, Always, func([][]byte) error { return nil })
+	a, err := OpenAOF(path, Always)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Append(rec("SET", "c", "3"))
 	a.Close()
-	if got, err := collect(t, path); err != nil || len(got) != 2 {
+	if got, err := collect(t, path, false); err != nil || len(got) != 2 {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
@@ -75,7 +77,7 @@ func TestTruncatedTailRepaired(t *testing.T) {
 func TestCorruptMiddleRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.aof")
 	os.WriteFile(path, []byte("*1\r\n$3\r\nDEL\r\n*1\r\n$x\r\n*1\r\n$3\r\nDEL\r\n"), 0o644)
-	if _, err := collect(t, path); err == nil || !strings.Contains(err.Error(), "offset 13") {
+	if _, err := collect(t, path, true); err == nil || !strings.Contains(err.Error(), "offset 13") {
 		t.Fatalf("want corruption error at offset 13, got %v", err)
 	}
 }
@@ -83,15 +85,13 @@ func TestCorruptMiddleRejected(t *testing.T) {
 func TestApplyErrorRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.aof")
 	os.WriteFile(path, []byte("*1\r\n$3\r\nBAD\r\n"), 0o644)
-	err := Replay(path, func([][]byte) error { return errors.New("unknown command") })
-	if err == nil {
+	if err := Replay(path, true, func([][]byte) error { return errors.New("unknown command") }); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestWriteFailureIsSticky(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "a.aof")
-	a, err := Open(path, Always, func([][]byte) error { return nil })
+	a, err := OpenAOF(filepath.Join(t.TempDir(), "a.aof"), Always)
 	if err != nil {
 		t.Fatal(err)
 	}

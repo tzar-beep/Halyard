@@ -19,6 +19,7 @@ func main() {
 	flag.StringVar(&cfg.Dir, "dir", "data", "data directory")
 	flag.BoolVar(&cfg.AppendOnly, "appendonly", true, "enable the append-only file")
 	flag.StringVar(&fsync, "appendfsync", "everysec", "AOF fsync policy: always|everysec|no")
+	flag.Int64Var(&cfg.AutoSaveBytes, "autosave-bytes", 64<<20, "snapshot and start a new AOF segment once it exceeds this size (0 = off)")
 	flag.Parse()
 
 	p, err := persistence.ParsePolicy(fsync)

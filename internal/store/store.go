@@ -256,6 +256,36 @@ func (s *Store) Persist(key string) bool {
 	return true
 }
 
+// Entry is one key as captured for a snapshot.
+type Entry struct {
+	Key      string
+	Val      []byte // shared with the store; values are never mutated in place
+	ExpireAt int64  // unix ms, 0 = no expiry
+}
+
+// Snapshot returns a point-in-time copy of all live keys. Values are shared, not
+// copied: the store replaces values rather than mutating them, so this is safe and
+// keeps the writer pause proportional to the key count, not the data size.
+func (s *Store) Snapshot() []Entry {
+	now := s.now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Entry, 0, len(s.data))
+	for k, v := range s.data {
+		at := s.expires[k]
+		if at != 0 && at <= now {
+			continue
+		}
+		out = append(out, Entry{Key: k, Val: v, ExpireAt: at})
+	}
+	return out
+}
+
+// Restore inserts an entry loaded from disk.
+func (s *Store) Restore(e Entry) {
+	s.Set(e.Key, e.Val, SetOpts{ExpireAt: e.ExpireAt})
+}
+
 // Len returns the number of keys, including expired ones not yet reclaimed.
 func (s *Store) Len() int {
 	s.mu.RLock()

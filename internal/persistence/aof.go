@@ -1,6 +1,7 @@
-// Package persistence implements the append-only file (AOF).
+// Package persistence implements durability: an append-only file (AOF) of mutations
+// plus point-in-time snapshots that let old AOF segments be discarded.
 //
-// Format: each successful mutation is stored as a RESP array, the same encoding
+// AOF format: each successful mutation is stored as a RESP array, the same encoding
 // clients send, so recovery reuses the protocol parser.
 //
 // Durability contract:
@@ -49,9 +50,11 @@ func ParsePolicy(s string) (Policy, error) {
 	return 0, fmt.Errorf("invalid appendfsync %q (want always|everysec|no)", s)
 }
 
+// AOF is one append-only log segment.
 type AOF struct {
 	mu     sync.Mutex
 	f      *os.File
+	cw     *countingWriter
 	w      *resp.Writer
 	policy Policy
 	err    error
@@ -61,18 +64,20 @@ type AOF struct {
 	done chan struct{}
 }
 
-// Open replays the log at path through apply, repairs a truncated tail, and opens it
-// for appending. A record that is malformed or rejected by apply aborts startup.
-func Open(path string, policy Policy, apply func(args [][]byte) error) (*AOF, error) {
-	if err := Replay(path, apply); err != nil {
-		return nil, err
-	}
+// OpenAOF opens (creating if needed) a segment for appending.
+func OpenAOF(path string, policy Policy) (*AOF, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
 	syncDir(filepath.Dir(path))
-	a := &AOF{f: f, w: resp.NewWriter(f), policy: policy, stop: make(chan struct{}), done: make(chan struct{})}
+	cw := &countingWriter{w: f, n: st.Size()}
+	a := &AOF{f: f, cw: cw, w: resp.NewWriter(cw), policy: policy, stop: make(chan struct{}), done: make(chan struct{})}
 	if policy == EverySec {
 		go a.syncLoop()
 	} else {
@@ -81,9 +86,10 @@ func Open(path string, policy Policy, apply func(args [][]byte) error) (*AOF, er
 	return a, nil
 }
 
-// Replay applies every complete record in path. A partial final record (e.g. from a
-// crash mid-write) is truncated away with a warning; corruption elsewhere is an error.
-func Replay(path string, apply func(args [][]byte) error) error {
+// Replay applies every complete record in path; a missing file is empty. If
+// repairTail is set, a partial final record (from a crash mid-write) is truncated
+// away with a warning; otherwise it is an error. Corruption elsewhere is always an error.
+func Replay(path string, repairTail bool, apply func(args [][]byte) error) error {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -103,7 +109,10 @@ func Replay(path string, apply func(args [][]byte) error) error {
 			break
 		}
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			log.Printf("aof: truncated record at offset %d; discarding %d trailing bytes", good, cr.n-good)
+			if !repairTail {
+				return fmt.Errorf("aof %s: truncated record at offset %d in a non-final segment", path, good)
+			}
+			log.Printf("aof %s: truncated record at offset %d; discarding %d trailing bytes", path, good, cr.n-good)
 			if err := f.Truncate(good); err != nil {
 				return fmt.Errorf("aof: truncate: %w", err)
 			}
@@ -113,10 +122,10 @@ func Replay(path string, apply func(args [][]byte) error) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("aof: corrupt record at offset %d: %w", good, err)
+			return fmt.Errorf("aof %s: corrupt record at offset %d: %w", path, good, err)
 		}
 		if err := apply(args); err != nil {
-			return fmt.Errorf("aof: record at offset %d rejected: %w", good, err)
+			return fmt.Errorf("aof %s: record at offset %d rejected: %w", path, good, err)
 		}
 		good = cr.n - int64(rd.Buffered())
 		n++
@@ -159,6 +168,13 @@ func (a *AOF) Err() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.err
+}
+
+// Size returns bytes written to the file so far (excluding unflushed buffer).
+func (a *AOF) Size() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cw.n
 }
 
 func (a *AOF) fail(err error) error {
@@ -230,7 +246,18 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// syncDir fsyncs a directory so a newly created file's entry is durable.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// syncDir fsyncs a directory so file creations/renames in it are durable.
 // Best effort: not supported on Windows.
 func syncDir(dir string) {
 	if d, err := os.Open(dir); err == nil {

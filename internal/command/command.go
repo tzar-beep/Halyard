@@ -29,10 +29,13 @@ const (
 	errWrongPass = "WRONGPASS invalid username-password pair or user is disabled."
 )
 
-// Appender persists mutation records (implemented by persistence.AOF).
-type Appender interface {
+// Persister persists mutation records and snapshots (implemented by persistence.Manager).
+type Persister interface {
 	Append(args [][]byte) error
 	Err() error // non-nil once the log is unusable; writes are then refused
+	Save() error
+	BGSave() bool
+	LastSave() int64
 }
 
 // handler executes a command, writes its reply, and returns the record to persist
@@ -46,8 +49,8 @@ type handler struct {
 
 type Dispatcher struct {
 	store    *store.Store
-	password string   // empty disables AUTH
-	aof      Appender // nil disables persistence
+	password string    // empty disables AUTH
+	aof      Persister // nil disables persistence
 	wmu      sync.Mutex
 
 	replayBuf bytes.Buffer
@@ -60,8 +63,15 @@ func NewDispatcher(s *store.Store, password string) *Dispatcher {
 	return d
 }
 
-// SetAppender enables persistence. Call before serving clients.
-func (d *Dispatcher) SetAppender(a Appender) { d.aof = a }
+// SetPersister enables persistence. Call before serving clients.
+func (d *Dispatcher) SetPersister(p Persister) { d.aof = p }
+
+// Freeze runs fn with all writers blocked (used to capture snapshots).
+func (d *Dispatcher) Freeze(fn func()) {
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+	fn()
+}
 
 // Session is per-connection state.
 type Session struct {
@@ -91,6 +101,10 @@ func init() {
 		"expireat":  {3, true, expire(time.Second, true)},
 		"pexpireat": {3, true, expire(time.Millisecond, true)},
 		"persist":   {2, true, persist},
+		"dbsize":    {1, false, dbsize},
+		"save":      {1, false, save},
+		"bgsave":    {1, false, bgsave},
+		"lastsave":  {1, false, lastsave},
 	}
 }
 
@@ -395,6 +409,43 @@ func persist(d *Dispatcher, w *resp.Writer, args [][]byte) [][]byte {
 	}
 	w.Integer(1)
 	return args
+}
+
+func dbsize(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
+	w.Integer(int64(d.store.Len()))
+	return nil
+}
+
+func save(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
+	if d.aof == nil {
+		w.Error("ERR persistence is disabled")
+	} else if err := d.aof.Save(); err != nil {
+		w.Error("ERR " + strings.TrimPrefix(err.Error(), "ERR "))
+	} else {
+		w.SimpleString("OK")
+	}
+	return nil
+}
+
+func bgsave(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
+	switch {
+	case d.aof == nil:
+		w.Error("ERR persistence is disabled")
+	case d.aof.BGSave():
+		w.SimpleString("Background saving started")
+	default:
+		w.Error("ERR Background save already in progress")
+	}
+	return nil
+}
+
+func lastsave(d *Dispatcher, w *resp.Writer, _ [][]byte) [][]byte {
+	if d.aof == nil {
+		w.Integer(0)
+	} else {
+		w.Integer(d.aof.LastSave())
+	}
+	return nil
 }
 
 // AUTH password | AUTH default password
