@@ -5,9 +5,11 @@
 // clients send, so recovery reuses the protocol parser.
 //
 // Durability contract:
-//   - always:   Append returns only after the record is written and fsynced.
-//     An acknowledged write survives process and OS crashes (given a disk
-//     that honours fsync).
+//   - always:   the caller acknowledges a write only after the wait function
+//     returned by Append reports it fsynced. Concurrent writers share fsyncs
+//     (group commit): one syncer goroutine flushes and fsyncs everything
+//     appended so far, then wakes every writer it covered. An acknowledged
+//     write survives process and OS crashes (given a disk that honours fsync).
 //   - everysec: records are buffered and fsynced about once per second.
 //     A crash can lose roughly the last second of acknowledged writes.
 //   - no:       records are written to the OS on every append but never
@@ -60,6 +62,12 @@ type AOF struct {
 	err    error
 	dirty  bool // buffered or unsynced data exists (everysec)
 
+	// Group commit (always): seq numbers appended records, synced is the highest
+	// one known durable. cond (on mu) signals the syncer and waiting writers.
+	seq, synced uint64
+	cond        *sync.Cond
+	closing     bool
+
 	stop chan struct{}
 	done chan struct{}
 }
@@ -77,10 +85,14 @@ func OpenAOF(path string, policy Policy) (*AOF, error) {
 	}
 	syncDir(filepath.Dir(path))
 	cw := &countingWriter{w: f, n: st.Size()}
-	a := &AOF{f: f, cw: cw, w: resp.NewWriter(cw), policy: policy, stop: make(chan struct{}), done: make(chan struct{})}
-	if policy == EverySec {
+	a := &AOF{f: f, cw: cw, w: resp.NewWriterSize(cw, 1<<20), policy: policy, stop: make(chan struct{}), done: make(chan struct{})}
+	a.cond = sync.NewCond(&a.mu)
+	switch policy {
+	case EverySec:
 		go a.syncLoop()
-	} else {
+	case Always:
+		go a.groupCommitLoop()
+	default:
 		close(a.done)
 	}
 	return a, nil
@@ -134,12 +146,16 @@ func Replay(path string, repairTail bool, apply func(args [][]byte) error) error
 	return nil
 }
 
-// Append writes one record according to the fsync policy.
-func (a *AOF) Append(args [][]byte) error {
+var noWait = func() error { return nil }
+
+// Append writes one record. The returned function blocks until the record is as
+// durable as the policy promises (for always: fsynced); call it after releasing
+// any locks, before acknowledging the write.
+func (a *AOF) Append(args [][]byte) (wait func() error, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.err != nil {
-		return a.err
+		return nil, a.err
 	}
 	a.w.ArrayHeader(len(args))
 	for _, arg := range args {
@@ -147,20 +163,60 @@ func (a *AOF) Append(args [][]byte) error {
 	}
 	switch a.policy {
 	case Always:
-		if err := a.w.Flush(); err != nil {
-			return a.fail(err)
-		}
-		if err := a.f.Sync(); err != nil {
-			return a.fail(err)
-		}
+		a.seq++
+		s := a.seq
+		a.cond.Broadcast()
+		return func() error {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			for a.synced < s && a.err == nil {
+				a.cond.Wait()
+			}
+			if a.synced >= s {
+				return nil
+			}
+			return a.err
+		}, nil
 	case No:
 		if err := a.w.Flush(); err != nil {
-			return a.fail(err)
+			return nil, a.fail(err)
 		}
 	case EverySec:
 		a.dirty = true
 	}
-	return nil
+	return noWait, nil
+}
+
+// groupCommitLoop fsyncs batches: everything appended while the previous fsync
+// was running is covered by the next one.
+func (a *AOF) groupCommitLoop() {
+	defer close(a.done)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for {
+		for a.synced == a.seq && !a.closing && a.err == nil {
+			a.cond.Wait()
+		}
+		if a.err != nil || (a.closing && a.synced == a.seq) {
+			return
+		}
+		target := a.seq
+		if err := a.w.Flush(); err != nil {
+			a.fail(err)
+			a.cond.Broadcast()
+			return
+		}
+		a.mu.Unlock()
+		err := a.f.Sync() // appenders keep buffering meanwhile
+		a.mu.Lock()
+		if err != nil {
+			a.fail(err)
+			a.cond.Broadcast()
+			return
+		}
+		a.synced = target
+		a.cond.Broadcast()
+	}
 }
 
 // Err reports a persistent failure; once set, no further appends succeed.
@@ -209,13 +265,30 @@ func (a *AOF) syncLoop() {
 		case <-a.stop:
 			return
 		case <-t.C:
-			a.mu.Lock()
-			dirty := a.dirty
-			a.mu.Unlock()
-			if dirty {
-				a.Sync()
-			}
+			a.backgroundSync()
 		}
+	}
+}
+
+// backgroundSync flushes under the lock but fsyncs outside it, so writers are not
+// stalled for the duration of the fsync (which can take milliseconds).
+func (a *AOF) backgroundSync() {
+	a.mu.Lock()
+	if !a.dirty || a.err != nil {
+		a.mu.Unlock()
+		return
+	}
+	if err := a.w.Flush(); err != nil {
+		a.fail(err)
+		a.mu.Unlock()
+		return
+	}
+	a.dirty = false
+	a.mu.Unlock()
+	if err := a.f.Sync(); err != nil {
+		a.mu.Lock()
+		a.fail(err)
+		a.mu.Unlock()
 	}
 }
 
@@ -227,6 +300,10 @@ func (a *AOF) Close() error {
 	default:
 		close(a.stop)
 	}
+	a.mu.Lock()
+	a.closing = true
+	a.cond.Broadcast()
+	a.mu.Unlock()
 	<-a.done
 	err := a.Sync()
 	if cerr := a.f.Close(); err == nil {

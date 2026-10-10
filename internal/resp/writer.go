@@ -12,7 +12,12 @@ type Writer struct {
 	num []byte
 }
 
-func NewWriter(w io.Writer) *Writer { return &Writer{bw: bufio.NewWriter(w), num: make([]byte, 0, 20)} }
+func NewWriter(w io.Writer) *Writer { return NewWriterSize(w, 4096) }
+
+// NewWriterSize is NewWriter with a custom buffer size.
+func NewWriterSize(w io.Writer, size int) *Writer {
+	return &Writer{bw: bufio.NewWriterSize(w, size), num: make([]byte, 0, 20)}
+}
 
 func (w *Writer) SimpleString(s string) {
 	w.bw.WriteByte('+')

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 )
 
 const (
@@ -15,6 +14,9 @@ const (
 	MaxBulkLen  = 64 << 20 // max bytes in one bulk string
 	MaxInline   = 64 << 10 // max inline request line length
 	preallocCap = 64       // never trust declared array length for allocation
+
+	arenaSize  = 16 << 10
+	largeValue = 64 << 10 // bigger bulk strings get their own allocation
 )
 
 // ProtocolError means the client sent malformed input; the connection should be closed.
@@ -24,9 +26,16 @@ func (e *ProtocolError) Error() string { return "Protocol error: " + e.msg }
 
 func protoErr(format string, a ...any) error { return &ProtocolError{fmt.Sprintf(format, a...)} }
 
-type Reader struct{ br *bufio.Reader }
+// Reader parses requests. To avoid per-argument allocations, the arguments returned
+// by ReadCommand point into buffers reused by the next call: callers must copy
+// anything they keep (the store clones values; keys become strings).
+type Reader struct {
+	br    *bufio.Reader
+	arena []byte   // backing storage for the current command's arguments
+	args  [][]byte // reused argument slice
+}
 
-func NewReader(r io.Reader) *Reader { return &Reader{bufio.NewReader(r)} }
+func NewReader(r io.Reader) *Reader { return &Reader{br: bufio.NewReader(r)} }
 
 // Buffered reports bytes already read from the connection but not yet parsed.
 func (r *Reader) Buffered() int { return r.br.Buffered() }
@@ -52,7 +61,14 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 	if n > MaxArgs {
 		return nil, protoErr("invalid multibulk length")
 	}
-	args := make([][]byte, 0, min(n, preallocCap))
+	r.arena = r.arena[:0]
+	if cap(r.args) > preallocCap*16 { // don't pin a huge slice after one big request
+		r.args = nil
+	}
+	args := r.args[:0]
+	if args == nil {
+		args = make([][]byte, 0, min(n, preallocCap))
+	}
 	for i := 0; i < n; i++ {
 		arg, err := r.readBulk()
 		if err != nil {
@@ -60,7 +76,22 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		}
 		args = append(args, arg)
 	}
+	r.args = args
 	return args, nil
+}
+
+// alloc returns n bytes for an argument, from the arena when it fits. When the
+// arena is full a new one is started; earlier arguments keep the old one alive.
+func (r *Reader) alloc(n int) []byte {
+	if n > largeValue {
+		return make([]byte, n)
+	}
+	if len(r.arena)+n > cap(r.arena) {
+		r.arena = make([]byte, 0, max(arenaSize, 2*n))
+	}
+	start := len(r.arena)
+	r.arena = r.arena[:start+n]
+	return r.arena[start : start+n : start+n]
 }
 
 func (r *Reader) readBulk() ([]byte, error) {
@@ -78,14 +109,18 @@ func (r *Reader) readBulk() ([]byte, error) {
 	if n < 0 || n > MaxBulkLen {
 		return nil, protoErr("invalid bulk length")
 	}
-	buf := make([]byte, n+2)
+	buf := r.alloc(n)
 	if _, err := io.ReadFull(r.br, buf); err != nil {
 		return nil, unexpectedEOF(err)
 	}
-	if buf[n] != '\r' || buf[n+1] != '\n' {
+	var crlf [2]byte
+	if _, err := io.ReadFull(r.br, crlf[:]); err != nil {
+		return nil, unexpectedEOF(err)
+	}
+	if crlf[0] != '\r' || crlf[1] != '\n' {
 		return nil, protoErr("bulk string not terminated by CRLF")
 	}
-	return buf[:n:n], nil
+	return buf, nil
 }
 
 // readInt reads a decimal integer terminated by CRLF.
@@ -97,27 +132,60 @@ func (r *Reader) readInt() (int, error) {
 	if len(line) < 2 || line[len(line)-2] != '\r' {
 		return 0, protoErr("expected CRLF")
 	}
-	n, err := strconv.Atoi(string(line[:len(line)-2]))
-	if err != nil {
+	n, ok := parseInt(line[:len(line)-2])
+	if !ok {
 		return 0, protoErr("invalid length")
 	}
 	return n, nil
 }
 
+// parseInt parses a decimal length without allocating.
+func parseInt(b []byte) (int, bool) {
+	neg := len(b) > 0 && b[0] == '-'
+	if neg {
+		b = b[1:]
+	}
+	if len(b) == 0 || len(b) > 18 {
+		return 0, false
+	}
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	if neg {
+		n = -n
+	}
+	return n, true
+}
+
 // readLine reads through '\n' (inclusive), rejecting lines longer than max bytes.
+// The common case returns a slice of the read buffer (valid until the next read).
 func (r *Reader) readLine(max int) ([]byte, error) {
-	var line []byte
+	frag, err := r.br.ReadSlice('\n')
+	if err == nil {
+		if len(frag) > max {
+			return nil, protoErr("line too long")
+		}
+		return frag, nil
+	}
+	line := append([]byte(nil), frag...)
 	for {
-		frag, err := r.br.ReadSlice('\n')
-		line = append(line, frag...)
 		if len(line) > max {
 			return nil, protoErr("line too long")
 		}
-		if err == nil {
-			return line, nil
-		}
 		if !errors.Is(err, bufio.ErrBufferFull) {
 			return nil, unexpectedEOF(err)
+		}
+		frag, err = r.br.ReadSlice('\n')
+		line = append(line, frag...)
+		if err == nil {
+			if len(line) > max {
+				return nil, protoErr("line too long")
+			}
+			return line, nil
 		}
 	}
 }
@@ -127,7 +195,7 @@ func (r *Reader) readInline() ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return bytes.Fields(line), nil
+	return bytes.Fields(append([]byte(nil), line...)), nil
 }
 
 // unexpectedEOF converts EOF mid-request into ErrUnexpectedEOF.

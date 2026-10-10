@@ -92,6 +92,8 @@ type Store struct {
 	epoch    uint64
 	watchers map[string]map[*Watch]struct{}
 
+	wtx Tx // reused by Update: only one writer runs at a time
+
 	now  func() int64
 	stop chan struct{}
 	done chan struct{}
@@ -146,7 +148,8 @@ func (s *Store) Update(fn func(*Tx)) {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fn(&Tx{s: s, now: now, write: true})
+	s.wtx = Tx{s: s, now: now, write: true}
+	fn(&s.wtx)
 }
 
 // UpdateAt is Update with a caller-supplied clock. Replicas applying the same log

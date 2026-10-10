@@ -118,6 +118,9 @@ func set(c *Ctx) {
 		c.tx.Persist(key)
 	}
 	c.w.SimpleString("OK")
+	if !c.log {
+		return
+	}
 	c.rec = [][]byte{[]byte("SET"), c.args[1], val}
 	switch {
 	case hasExpire:
@@ -217,6 +220,8 @@ func incrBy(delta int64) func(*Ctx) {
 		v := strconv.AppendInt(nil, cur, 10)
 		c.tx.Put(key, store.NewString(v))
 		c.w.Integer(cur)
-		c.rec = [][]byte{[]byte("SET"), c.args[1], v, []byte("KEEPTTL")}
+		if c.log {
+			c.rec = [][]byte{[]byte("SET"), c.args[1], v, []byte("KEEPTTL")}
+		}
 	}
 }

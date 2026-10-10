@@ -136,16 +136,18 @@ func (m *Manager) migrateLegacy() error {
 }
 
 // Append logs a record and may trigger a background snapshot. Callers serialize
-// Append (the dispatcher's write lock), which also excludes rotation.
-func (m *Manager) Append(args [][]byte) error {
+// Append (the dispatcher's write lock), which also excludes rotation. The returned
+// function waits for durability (see AOF.Append).
+func (m *Manager) Append(args [][]byte) (func() error, error) {
 	a := m.aof.Load()
-	if err := a.Append(args); err != nil {
-		return err
+	wait, err := a.Append(args)
+	if err != nil {
+		return nil, err
 	}
 	if m.opts.AutoSaveBytes > 0 && a.Size() >= m.opts.AutoSaveBytes {
 		m.BGSave() // no-op if a save is already running
 	}
-	return nil
+	return wait, nil
 }
 
 func (m *Manager) Err() error { return m.aof.Load().Err() }

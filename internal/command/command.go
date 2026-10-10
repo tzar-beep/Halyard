@@ -34,7 +34,9 @@ const (
 
 // Persister persists mutation records and snapshots (implemented by persistence.Manager).
 type Persister interface {
-	Append(args [][]byte) error
+	// Append logs a record; the returned function blocks until it is durable
+	// according to the fsync policy, and must be called before acknowledging.
+	Append(args [][]byte) (wait func() error, err error)
 	Err() error // non-nil once the log is unusable; writes are then refused
 	Save() error
 	BGSave() bool
@@ -62,6 +64,7 @@ type Ctx struct {
 	w    *resp.Writer
 	args [][]byte
 	rec  [][]byte // record to persist; set only when the command changed state
+	log  bool     // persistence is on: handlers must build rec
 }
 
 type Dispatcher struct {
@@ -123,6 +126,34 @@ func init() {
 	table["save"] = handler{1, admin, save}
 	table["bgsave"] = handler{1, admin, bgsave}
 	table["lastsave"] = handler{1, admin, lastsave}
+	for n := range table {
+		names[n] = n
+	}
+	for _, n := range []string{"auth", "multi", "exec", "discard", "watch", "unwatch", "raft", "delexpired", "txn"} {
+		names[n] = n
+	}
+}
+
+// names interns lowercase command names so lookups do not allocate.
+var names = map[string]string{}
+
+// cmdName lowercases a command name without allocating for known commands.
+func cmdName(b []byte) string {
+	var buf [32]byte
+	if len(b) > len(buf) {
+		return strings.ToLower(string(b))
+	}
+	lb := buf[:len(b)]
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		lb[i] = c
+	}
+	if s, ok := names[string(lb)]; ok {
+		return s
+	}
+	return string(lb)
 }
 
 // Dispatch executes one command and writes its reply to w. A non-nil error means a
@@ -132,7 +163,7 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 	if len(args) == 0 {
 		return nil
 	}
-	name := strings.ToLower(string(args[0]))
+	name := cmdName(args[0])
 	if name == "auth" {
 		d.auth(w, sess, args)
 		return nil
@@ -229,16 +260,24 @@ func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) erro
 			return nil
 		}
 		d.wmu.Lock()
-		defer d.wmu.Unlock()
 		var rec [][]byte
 		d.store.Update(func(tx *store.Tx) {
-			c := &Ctx{d: d, tx: tx, w: w, args: args}
+			c := &Ctx{d: d, tx: tx, w: w, args: args, log: true}
 			h.fn(c)
 			rec = c.rec
 		})
+		var wait func() error
+		var err error
 		if rec != nil {
-			if err := d.aof.Append(rec); err != nil {
-				return fmt.Errorf("aof append: %w", err)
+			wait, err = d.aof.Append(rec)
+		}
+		d.wmu.Unlock()
+		if err != nil {
+			return fmt.Errorf("aof append: %w", err)
+		}
+		if wait != nil {
+			if err := wait(); err != nil { // group commit: wait outside the lock
+				return fmt.Errorf("aof sync: %w", err)
 			}
 		}
 	}
@@ -278,7 +317,6 @@ func (d *Dispatcher) exec(w *resp.Writer, sess *Session) error {
 			return nil
 		}
 		d.wmu.Lock()
-		defer d.wmu.Unlock()
 	}
 	var recs [][][]byte
 	aborted := false
@@ -289,26 +327,37 @@ func (d *Dispatcher) exec(w *resp.Writer, sess *Session) error {
 		}
 		w.ArrayHeader(len(sess.queued))
 		for _, args := range sess.queued {
-			c := &Ctx{d: d, tx: tx, w: w, args: args}
-			table[strings.ToLower(string(args[0]))].fn(c)
+			c := &Ctx{d: d, tx: tx, w: w, args: args, log: d.aof != nil}
+			table[cmdName(args[0])].fn(c)
 			if c.rec != nil {
 				recs = append(recs, c.rec)
 			}
 		}
 	})
-	if aborted {
-		w.NullArray()
+	if d.aof == nil {
+		if aborted {
+			w.NullArray()
+		}
 		return nil
 	}
-	if d.aof == nil || len(recs) == 0 {
+	if aborted || len(recs) == 0 {
+		d.wmu.Unlock()
+		if aborted {
+			w.NullArray()
+		}
 		return nil
 	}
 	rec := recs[0]
 	if len(recs) > 1 {
 		rec = encodeTxn(recs)
 	}
-	if err := d.aof.Append(rec); err != nil {
+	wait, err := d.aof.Append(rec)
+	d.wmu.Unlock()
+	if err != nil {
 		return fmt.Errorf("aof append: %w", err)
+	}
+	if err := wait(); err != nil {
+		return fmt.Errorf("aof sync: %w", err)
 	}
 	return nil
 }

@@ -96,13 +96,18 @@ func TestWriteFailureIsSticky(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.f.Close() // simulate a dead disk
-	if err := a.Append(rec("SET", "k", "v")); err == nil {
-		t.Fatal("append to closed file succeeded")
+	// With group commit the failure surfaces when waiting for durability.
+	wait, err := a.Append(rec("SET", "k", "v"))
+	if err == nil {
+		err = wait()
+	}
+	if err == nil {
+		t.Fatal("append to closed file reported durable")
 	}
 	if a.Err() == nil {
 		t.Fatal("failure not recorded")
 	}
-	if err := a.Append(rec("SET", "k", "v")); err == nil {
+	if _, err := a.Append(rec("SET", "k", "v")); err == nil {
 		t.Fatal("append after failure succeeded")
 	}
 }

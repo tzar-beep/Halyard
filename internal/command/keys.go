@@ -89,6 +89,9 @@ func expire(unit time.Duration, absolute bool) func(*Ctx) {
 		at := base + n*mult
 		c.tx.SetExpireAt(key, at)
 		c.w.Integer(1)
+		if !c.log {
+			return
+		}
 		if at <= now {
 			c.rec = [][]byte{[]byte("DEL"), c.args[1]}
 		} else {

@@ -145,7 +145,7 @@ func (f *fakeDB) set(t *testing.T, m *Manager, k, v string) {
 	f.mu.Lock()
 	f.data[k] = v
 	f.mu.Unlock()
-	if err := m.Append(rec("SET", k, v)); err != nil {
+	if _, err := m.Append(rec("SET", k, v)); err != nil {
 		t.Fatal(err)
 	}
 }
