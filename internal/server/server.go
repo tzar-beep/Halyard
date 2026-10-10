@@ -1,44 +1,113 @@
+// Package server owns the TCP listener and per-connection lifecycle.
 package server
 
 import (
-	"bufio"
+	"errors"
+	"io"
 	"log"
 	"net"
-	"strings"
+	"sync"
+
+	"github.com/tzar-beep/redis/internal/command"
+	"github.com/tzar-beep/redis/internal/resp"
+	"github.com/tzar-beep/redis/internal/store"
 )
 
-type Server struct{ addr string }
+type Server struct {
+	addr string
+	disp *command.Dispatcher
 
-func New(addr string) *Server { return &Server{addr: addr} }
+	mu    sync.Mutex
+	ln    net.Listener
+	conns map[net.Conn]struct{}
+	done  bool
+	wg    sync.WaitGroup
+}
+
+func New(addr string) *Server {
+	return &Server{addr: addr, disp: command.NewDispatcher(store.New()), conns: map[net.Conn]struct{}{}}
+}
 
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return err
 	}
-	log.Printf("listening on %s", s.addr)
+	log.Printf("listening on %s", ln.Addr())
+	return s.Serve(ln)
+}
+
+// Serve accepts connections on ln until Close is called.
+func (s *Server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	s.ln = ln
+	s.mu.Unlock()
 	for {
 		c, err := ln.Accept()
-		if err != nil {
-			log.Printf("accept: %v", err)
-			continue
+		s.mu.Lock()
+		if s.done {
+			s.mu.Unlock()
+			if c != nil {
+				c.Close()
+			}
+			return nil
 		}
-		go handle(c)
+		if err != nil {
+			s.mu.Unlock()
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			return err
+		}
+		s.conns[c] = struct{}{}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		go s.handle(c)
 	}
 }
 
-// Phase 0 stub: replies +PONG to anything containing PING. Real RESP parser comes in Phase 1.
-func handle(c net.Conn) {
-	defer c.Close()
-	r, w := bufio.NewReader(c), bufio.NewWriter(c)
+// Close stops the listener, closes all client connections and waits for handlers.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	s.done = true
+	var err error
+	if s.ln != nil {
+		err = s.ln.Close()
+	}
+	for c := range s.conns {
+		c.Close()
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+	return err
+}
+
+func (s *Server) handle(c net.Conn) {
+	defer func() {
+		c.Close()
+		s.mu.Lock()
+		delete(s.conns, c)
+		s.mu.Unlock()
+		s.wg.Done()
+	}()
+	r, w := resp.NewReader(c), resp.NewWriter(c)
 	for {
-		line, err := r.ReadString('\n')
+		args, err := r.ReadCommand()
 		if err != nil {
+			var pe *resp.ProtocolError
+			if errors.As(err, &pe) {
+				w.Error("ERR " + pe.Error())
+				w.Flush()
+			} else if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				log.Printf("conn %s: %v", c.RemoteAddr(), err)
+			}
 			return
 		}
-		if strings.EqualFold(strings.TrimSpace(line), "PING") {
-			w.WriteString("+PONG\r\n")
-			if w.Flush() != nil {
+		s.disp.Dispatch(w, args)
+		// Flush only once the pipeline is drained: batches replies to pipelined requests.
+		if r.Buffered() == 0 {
+			if err := w.Flush(); err != nil {
 				return
 			}
 		}
