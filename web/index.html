@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css?v=4">
-  <link rel="stylesheet" href="landing.css?v=4">
+  <link rel="stylesheet" href="landing.css?v=5">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1c1e'/%3E%3Crect x='4' y='4' width='8' height='8' rx='1' fill='%23ededef'/%3E%3C/svg%3E">
   <script src="config.js?v=4"></script>
 </head>
@@ -28,7 +28,7 @@
   </header>
 
   <main>
-    <section class="hero wrap">
+    <section class="hero wrap"><div class="hero-grid"><div>
       <a class="live-pill" href="cluster.html" id="live">
         <span class="sdot"></span><span id="live-text">Checking live cluster…</span>
       </a>
@@ -40,22 +40,22 @@
         <a class="btn btn-primary btn-lg" href="cluster.html">Open the live cluster</a>
         <a class="btn btn-lg" href="#start">Run it locally</a>
       </div>
+    </div>
+    <div class="globe-wrap" aria-hidden="true">
+      <canvas id="globe"></canvas>
+      <div class="globe-cap"><span class="sdot ok-dot"></span>leader · replicas follow</div>
+    </div></div>
 
       <div class="hero-term">
         <div class="ht-head"><span>terminal</span><span class="ht-tag">3-node cluster</span></div>
-<pre><span class="c">$</span> docker compose -f deploy/docker-compose.cluster.yml up -d
-<span class="c">$</span> redis-cli -c -p 6381 SET order:1042 paid
-<span class="o">OK</span>
-<span class="c">$</span> docker stop deploy-n1-1   <span class="m"># kill the leader</span>
-<span class="c">$</span> redis-cli -c -p 6382 GET order:1042
-<span class="m">-&gt; Redirected to slot [0] located at localhost:6383</span>
-<span class="o">"paid"</span>        <span class="m"># new leader elected, write intact</span></pre>
+<pre id="typed"></pre>
       </div>
 
-      <div class="compat">
-        <span class="compat-label">Works with existing tools</span>
-        <span>redis-cli</span><span>redis-benchmark</span><span>go-redis</span><span>redis-py</span><span>ioredis</span><span>Prometheus</span>
-      </div>
+    </section>
+    <section class="velocity" aria-label="Capabilities">
+      <div class="vrow" data-dir="1"><div class="vtrack">PreVote · CheckQuorum · ReadIndex · Snapshots · Leadership transfer · Membership changes · Group commit · </div></div>
+      <div class="vrow" data-dir="-1"><div class="vtrack">redis-cli · redis-benchmark · go-redis · redis-py · ioredis · Prometheus · TLS · ACL · </div></div>
+
     </section>
 
     <section class="wrap band" id="features">
@@ -167,6 +167,17 @@ redis-cli -c -h h1 CLUSTER MIGRATE 5000 2   <span class="m"># live slot migratio
       </div>
     </section>
 
+    <section class="wrap band" id="faq">
+      <div class="band-head"><span class="kicker">FAQ</span><h2>Questions engineers ask.</h2></div>
+      <div class="accordion">
+        <details><summary>Is it a drop-in replacement for Redis?</summary><p>For the supported subset — strings, lists, hashes, sets, sorted sets, TTLs, transactions, cluster redirects — yes: unmodified clients work. Lua, Pub/Sub, streams and RESP3 are not implemented.</p></details>
+        <details><summary>What happens when the leader crashes?</summary><p>Followers stop receiving heartbeats, a randomized election timeout fires, and a new leader is elected by majority vote — about 400 ms with test timeouts, ~1.3 s with defaults. Only writes that never reached a majority can be lost, and those were never acknowledged.</p></details>
+        <details><summary>Are reads consistent?</summary><p>Yes. Reads use ReadIndex: the leader confirms with a quorum that it is still leader before answering, so reads are linearizable even during partitions.</p></details>
+        <details><summary>How fast is it compared to Redis?</summary><p>83–100% of Redis 7 throughput on pipelined benchmarks on the same machine. Tail latency under heavy write contention is higher — see docs/benchmarks.md.</p></details>
+        <details><summary>How do you know it's correct?</summary><p>A deterministic simulator runs thousands of chaos seeds per test run, a Jepsen-style checker validates real cluster histories, and differential tests compare every reply with Redis 7.</p></details>
+      </div>
+    </section>
+
     <section class="wrap closing">
       <h2>See it fail over yourself.</h2>
       <p>The live cluster page lets you stop the leader and watch a new one get elected.</p>
@@ -179,6 +190,6 @@ redis-cli -c -h h1 CLUSTER MIGRATE 5000 2   <span class="m"># live slot migratio
     <span><a href="cluster.html">Live cluster</a></span>
   </footer>
 
-  <script src="landing.js?v=4"></script>
+  <script type="module" src="landing.js?v=7"></script>
 </body>
 </html>
