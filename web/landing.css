@@ -95,10 +95,10 @@
 @keyframes blink { 50% { opacity: 0; } }
 
 /* scroll-velocity marquee */
-.velocity { margin-top: 64px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 18px 0; overflow: hidden; display: grid; gap: 10px; }
+.velocity { margin-top: 64px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 28px 0; overflow: hidden; display: grid; gap: 6px; background: var(--panel); }
 .vrow { white-space: nowrap; overflow: hidden; }
-.vtrack { display: inline-block; font: 500 clamp(18px, 2.4vw, 26px) var(--sans); letter-spacing: -0.02em; color: var(--text-3); will-change: transform; }
-.vrow[data-dir="-1"] .vtrack { color: var(--text-2); }
+.vtrack { display: inline-block; font: 600 clamp(28px, 4vw, 48px) var(--sans); letter-spacing: -0.03em; color: var(--text); will-change: transform; }
+.vrow[data-dir="-1"] .vtrack { color: var(--text-3); }
 
 /* accordion (shadcn-style) */
 .accordion { border-top: 1px solid var(--border); max-width: 820px; }
