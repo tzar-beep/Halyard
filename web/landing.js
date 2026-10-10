@@ -14,10 +14,25 @@ document.getElementById("bench-rows").innerHTML = BENCH.map(([name, h, r]) => `
   <div class="brow">
     <span class="bname">${name}</span>
     <div class="bars">
-      <div class="bar-line"><div class="bar-track"><div class="bar-h" style="width:${(h / max) * 100}%"></div></div><span class="bval">${k(h)} <em>${Math.round((h / r) * 100)}%</em></span></div>
-      <div class="bar-line"><div class="bar-track"><div class="bar-r" style="width:${(r / max) * 100}%"></div></div><span class="bval">${k(r)}</span></div>
+      <div class="bar-track"><div class="bar-h" style="width:${(h / max) * 100}%"></div></div>
+      <div class="bar-track"><div class="bar-r" style="width:${(r / max) * 100}%"></div></div>
     </div>
+    <span class="bnum">${k(h)}</span><span class="bnum dim">${k(r)}</span><span class="bnum ratio">${Math.round((h / r) * 100)}%</span>
   </div>`).join("");
+
+// Copy buttons on commands.
+document.querySelectorAll("code.cmd, pre.code").forEach((el) => {
+  const b = document.createElement("button");
+  b.className = "copy";
+  b.type = "button";
+  b.textContent = "Copy";
+  b.addEventListener("click", async () => {
+    const text = [...el.childNodes].filter((n) => !(n.classList && n.classList.contains("m")) && n !== b).map((n) => n.textContent).join("").trim();
+    try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select & copy"; }
+    setTimeout(() => { b.textContent = "Copy"; }, 1400);
+  });
+  el.appendChild(b);
+});
 
 document.querySelectorAll(".start-tabs button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".start-tabs button").forEach((x) => x.classList.toggle("active", x === b));

@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css?v=11">
-  <link rel="stylesheet" href="landing.css?v=12">
+  <link rel="stylesheet" href="landing.css?v=13">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <script src="wasm_exec.js"></script>
 </head>
@@ -38,21 +38,31 @@
 
   <main>
     <section class="intro wrap">
-      <p class="eyebrow">Redis protocol · Raft consensus · Go, no dependencies</p>
-      <h1>A Redis-compatible database that keeps every acknowledged write when its servers die.</h1>
-      <div class="intro-grid">
-        <p class="lede">It speaks the Redis protocol, so <code>redis-cli</code> and existing clients just work. Every write
-          is replicated with Raft and acknowledged only once a majority has it on disk.</p>
-        <p class="lede strong">Below: Halyard's actual Raft code, compiled to WebAssembly, running five nodes in your browser.</p>
-        <dl class="facts">
-          <div><dt>Failover</dt><dd>≈ 400 ms</dd></div>
-          <div><dt>Acked writes lost</dt><dd>0 / 823</dd></div>
-          <div><dt>vs. Redis 7</dt><dd>83–100%</dd></div>
-        </dl>
+      <p class="eyebrow"><span class="dot"></span>Open source · Go · zero dependencies</p>
+      <h1>The Redis protocol,<br><span class="dim">replicated with Raft.</span></h1>
+      <p class="lede">Halyard speaks RESP, so <code>redis-cli</code> and your existing clients just work. Every write is
+        replicated to a majority and on disk before it's acknowledged — a server can die at any moment and no confirmed
+        write is lost.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" href="#playground">Break the cluster below ↓</a>
+        <a class="btn btn-lg" href="cluster.html">Open the live cluster</a>
+      </div>
+      <div class="statline">
+        <div><b>≈ 400 ms</b><span>leader failover</span></div>
+        <div><b>0 / 823</b><span>acked writes lost on kill</span></div>
+        <div><b>400k</b><span>commands identical to Redis 7</span></div>
+        <div><b>83–100%</b><span>of Redis 7 throughput</span></div>
       </div>
     </section>
 
     <section class="wrap" id="playground">
+      <div class="pg-intro">
+        <div>
+          <h2>Raft playground</h2>
+          <p>Halyard's production Raft package, compiled to WebAssembly. Five nodes, one virtual clock, your browser.</p>
+        </div>
+        <span class="src">internal/raft → raft.wasm</span>
+      </div>
       <div class="pg" id="pg">
         <div class="pg-bar">
           <div class="pg-group">
@@ -113,15 +123,14 @@
     </section>
 
     <section class="wrap block-lg" id="failover">
-      <h2>Failover, measured</h2>
-      <p class="section-lede">From the cluster test that kills the leader of a three-node cluster while eight clients write
-        to it. Election timeout 200–400 ms.</p>
+      <div class="sec-head"><h2>Failover, measured</h2><span class="src">tests/cluster · TestLeaderFailover</span></div>
+      <p class="section-lede">A three-node cluster loses its leader while eight clients write to it. Election timeout 200–400 ms.</p>
       <div class="timeline">
-        <div class="tl-track"><i class="tl-a"></i><i class="tl-b"></i></div>
-        <div class="tl-marks">
-          <div style="left:0%"><b>0 ms</b><span>Leader process killed</span></div>
-          <div style="left:48%"><b>~200 ms</b><span>First follower's election timer fires</span></div>
-          <div style="left:100%" class="end"><b>389 ms</b><span>New leader accepts writes</span></div>
+        <div class="tl-track"><i class="tl-a"></i><i class="tl-b"></i><span class="tl-dot" style="left:0"></span><span class="tl-dot warn" style="left:51%"></span><span class="tl-dot ok" style="left:100%"></span></div>
+        <div class="tl-labels">
+          <div><b>0 ms</b><span>Leader process killed</span></div>
+          <div class="mid"><b>~200 ms</b><span>A follower's election timer fires</span></div>
+          <div class="end"><b>389 ms</b><span>New leader accepting writes</span></div>
         </div>
       </div>
       <div class="numbers">
@@ -132,11 +141,11 @@
     </section>
 
     <section class="wrap block-lg" id="benchmarks">
-      <h2>Benchmarks</h2>
+      <div class="sec-head"><h2>Benchmarks</h2><span class="src">benchmarks/compare.sh</span></div>
       <p class="section-lede"><code>redis-benchmark -c 50 -P 16</code> against Halyard and Redis 7 on the same machine,
         persistence off. Requests per second, higher is better.</p>
       <div class="bench">
-        <div class="bench-legend"><span><i class="h"></i>Halyard</span><span><i class="r"></i>Redis 7</span></div>
+        <div class="bench-head"><span>Command</span><span></span><span>Halyard</span><span>Redis 7</span><span>Ratio</span></div>
         <div id="bench-rows"></div>
       </div>
       <p class="fine">Where it's slower: p99 latency under heavy concurrent writes with the AOF on is about 3× Redis's,
@@ -144,8 +153,8 @@
     </section>
 
     <section class="wrap block-lg" id="tests">
-      <h2>How it's tested</h2>
-      <p class="section-lede">Each line is a command you can run from the repository.</p>
+      <div class="sec-head"><h2>How it's tested</h2><span class="src">run any of these from the repo root</span></div>
+      <p class="section-lede">Correctness claims are only as good as the tests behind them. Each card ends with the command that reproduces it.</p>
       <div class="tests">
         <div class="test">
           <div class="test-head"><b>Deterministic simulation</b><span class="pass">2,000+ seeds · pass</span></div>
@@ -174,7 +183,7 @@
     </section>
 
     <section class="wrap block-lg" id="run">
-      <h2>Run it</h2>
+      <div class="sec-head"><h2>Run it</h2><span class="src">Docker or Go 1.22+</span></div>
       <div class="start">
         <div class="start-tabs" role="tablist">
           <button class="active" data-tab="cluster" role="tab">3-node cluster</button>
@@ -196,12 +205,19 @@ redis-cli -c -h h1 CLUSTER MIGRATE 5000 2   <span class="m"># move a slot while 
     </section>
   </main>
 
-  <footer class="wrap footer">
-    <span>Halyard — built by Vaibhav to learn consensus by writing it. Go · RESP2 · Raft.</span>
-    <span><a href="cluster.html">Live cluster</a> · <a href="https://github.com/tzar-beep" target="_blank" rel="noopener">GitHub</a></span>
+  <footer class="site-footer">
+    <div class="wrap footer-grid">
+      <div class="f-brand">
+        <img src="logo.svg" alt="halyard" height="30">
+        <p>A Redis-compatible database replicated with Raft. Built by Vaibhav to learn consensus by writing it.</p>
+      </div>
+      <div class="f-col"><b>Project</b><a href="#playground">Playground</a><a href="cluster.html">Live cluster</a><a href="#benchmarks">Benchmarks</a><a href="#run">Run it</a></div>
+      <div class="f-col"><b>Source</b><a href="https://github.com/tzar-beep" target="_blank" rel="noopener">GitHub</a><a href="#tests">Test suite</a></div>
+    </div>
+    <div class="wrap f-base"><span>© 2026 Halyard</span><span>Go · RESP2 · Raft</span></div>
   </footer>
 
   <script src="playground.js?v=4"></script>
-  <script src="landing.js?v=10"></script>
+  <script src="landing.js?v=11"></script>
 </body>
 </html>
