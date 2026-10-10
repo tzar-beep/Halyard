@@ -85,3 +85,7 @@ bash benchmarks/compare.sh                            # redis-benchmark vs Redis
 - [Development phases](PHASES.md)
 
 Not supported: Lua, Pub/Sub, streams, RESP3, and Redis's RDB file format.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
