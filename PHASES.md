@@ -9,7 +9,7 @@ Out of scope: Lua, modules and RESP3-only features.
 
 ## Phase 0 â€” Setup (Day 1)
 - Install Go, `redis-cli` (via WSL or Docker) and Docker.
-- `go mod init`. Create the layout: `cmd/server`, `internal/{server,resp,command,store,persistence,replication,config}`, `tests/integration`, `benchmarks`, `docs`.
+- `go mod init`. Create the layout: `cmd/halyard`, `internal/{server,resp,command,store,persistence,replication,config}`, `tests/integration`, `benchmarks`, `docs`.
 - Engineering rules: every feature has tests; malformed input never crashes the server or affects other clients; shared state has a clear locking strategy; every persistence/replication guarantee has a test that proves it.
 - **Exit:** a TCP server on :6379 that replies `+PONG\r\n` to PING from a separate terminal.
 

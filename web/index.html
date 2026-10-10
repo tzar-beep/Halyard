@@ -158,7 +158,7 @@ docker compose -f deploy/docker-compose.cluster.yml up -d --build
 redis-cli -c -p 6381 SET hello world
 redis-cli -p 6381 INFO replication</pre>
 <pre class="code" data-panel="single" hidden><span class="m"># one node with an append-only file, fsync every second</span>
-go run ./cmd/server -addr :6379 -appendfsync everysec
+go run ./cmd/halyard -addr :6379 -appendfsync everysec
 redis-cli SET hello world</pre>
 <pre class="code" data-panel="sharded" hidden><span class="m"># 3 Raft groups own the 16,384 slots; leaders are spread across nodes</span>
 halyard -id 1 -shards 3 -cluster 1=h1:7000/h1:6379,2=h2:7000/h2:6379,3=h3:7000/h3:6379

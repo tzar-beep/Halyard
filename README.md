@@ -1,4 +1,4 @@
-# Raft Redis
+# Halyard
 
 A Redis-compatible database written from scratch in Go with no external
 dependencies. It runs as a single node with AOF and snapshots, as a Raft-replicated
@@ -39,7 +39,7 @@ The simulator found two real Raft bugs before they shipped. Both are written up 
 ## Run it
 
 ```bash
-go run ./cmd/server                                                   # single node on :6379
+go run ./cmd/halyard                                                   # single node on :6379
 docker compose -f deploy/docker-compose.cluster.yml up -d --build     # 3-node Raft cluster
 ```
 

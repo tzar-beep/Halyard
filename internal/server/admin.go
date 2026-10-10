@@ -34,7 +34,7 @@ func (s *Server) info(w *resp.Writer, args [][]byte) {
 	var b strings.Builder
 	want := func(name string) bool { return section == "all" || section == "default" || section == name }
 	if want("server") {
-		fmt.Fprintf(&b, "# Server\r\nredis_version:%s\r\nimplementation:go-raft-redis\r\nmode:%s\r\ngo_version:%s\r\nos:%s/%s\r\nuptime_in_seconds:%.0f\r\ntcp_addr:%s\r\n\r\n",
+		fmt.Fprintf(&b, "# Server\r\nredis_version:%s\r\nimplementation:halyard\r\nmode:%s\r\ngo_version:%s\r\nos:%s/%s\r\nuptime_in_seconds:%.0f\r\ntcp_addr:%s\r\n\r\n",
 			Version, s.mode(), runtime.Version(), runtime.GOOS, runtime.GOARCH, metrics.Uptime().Seconds(), s.addr)
 	}
 	if want("clients") {

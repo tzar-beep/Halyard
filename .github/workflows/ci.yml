@@ -27,4 +27,4 @@ jobs:
           DIFF_SEEDS: "50"
         run: go test -count=1 ./tests/differential
       - name: docker image
-        run: docker build -t redis-raft .
+        run: docker build -t halyard .

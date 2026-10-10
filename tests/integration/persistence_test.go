@@ -100,7 +100,7 @@ func TestCrashLosesNoAckedWrites(t *testing.T) {
 		t.Skip("builds and kills a subprocess")
 	}
 	bin := filepath.Join(t.TempDir(), "server.exe")
-	if out, err := exec.Command("go", "build", "-o", bin, "../../cmd/server").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-o", bin, "../../cmd/halyard").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 	dir := t.TempDir()
