@@ -3,61 +3,151 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Raft Redis Live</title>
-  <meta name="description" content="A Redis-compatible database written from scratch in Go, replicated with Raft. Kill the leader and watch it fail over.">
-  <link rel="stylesheet" href="style.css">
-  <script src="config.js"></script>
+  <title>Raft Redis — Cluster</title>
+  <meta name="description" content="A Redis-compatible database written from scratch in Go and replicated with Raft. Live cluster view with fault injection.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1c1e'/%3E%3Crect x='4' y='4' width='8' height='8' rx='1' fill='%23ededef'/%3E%3C/svg%3E">
+  <script src="config.js?v=3"></script>
 </head>
 <body>
-  <header>
-    <div class="wrap">
-      <h1>Raft Redis <span class="tag">live</span></h1>
-      <p class="lede">A Redis-compatible key-value store written from scratch in Go: RESP protocol, AOF + snapshots,
-        Raft consensus, sharding, and linearizability-checked fault tolerance. Below is a real 3-node cluster.</p>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="wordmark" href="#">
+        <span class="mark" aria-hidden="true"></span>raft-redis
+        <span class="version">v1.0</span>
+      </a>
+      <nav class="tabs" aria-label="Sections">
+        <a href="#overview" class="active">Overview</a>
+        <a href="#nodes">Nodes</a>
+        <a href="#console">Console</a>
+        <a href="#design">Design</a>
+      </nav>
+      <div class="status" id="status"><span class="sdot"></span><span id="status-text">Connecting</span></div>
     </div>
   </header>
 
   <main class="wrap">
-    <section>
-      <div class="section-head">
-        <h2>Cluster</h2>
-        <div class="actions">
-          <button id="kill" class="danger" disabled>Kill the leader</button>
-          <span id="failover" class="muted"></span>
+    <section id="overview" class="block">
+      <div class="page-head">
+        <div>
+          <h1>Cluster overview</h1>
+          <p class="sub">A Redis-compatible database written from scratch in Go, replicated across three nodes with Raft.
+            Writes are acknowledged only after a majority has them on disk.</p>
+        </div>
+        <button class="btn btn-danger" id="kill" disabled>Stop leader</button>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><span class="label">Leader</span><span class="value" id="s-leader">—</span></div>
+        <div class="stat"><span class="label">Term</span><span class="value" id="s-term">—</span></div>
+        <div class="stat"><span class="label">Commit index</span><span class="value" id="s-commit">—</span></div>
+        <div class="stat"><span class="label">Entries / s</span><span class="value" id="s-rate">—</span></div>
+        <div class="stat"><span class="label">Last failover</span><span class="value" id="s-failover">—</span></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Replication topology</h2>
+            <div class="legend"><span><i class="ok"></i>leader</span><span><i class="neutral"></i>follower</span><span><i class="err"></i>unreachable</span></div>
+          </div>
+          <svg id="topo" viewBox="0 0 480 260" role="img" aria-label="Replication topology"></svg>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Failover</h2><span class="tag">fault injection</span></div>
+          <p class="note">“Stop leader” freezes the current leader for 5 seconds. The followers stop receiving heartbeats,
+            time out, and elect a replacement. The stopped node rejoins as a follower.</p>
+          <div class="failover" id="fo">
+            <div class="fo-state" id="fo-state">Idle</div>
+            <div class="fo-time" id="fo-time">0.0 s</div>
+            <div class="fo-bar"><i id="fo-bar"></i></div>
+            <div class="fo-sub" id="fo-sub">No failover in progress.</div>
+          </div>
+          <table class="mini">
+            <thead><tr><th>Term</th><th>Leader</th><th>Observed</th></tr></thead>
+            <tbody id="elections"><tr><td colspan="3" class="empty">No elections observed yet.</td></tr></tbody>
+          </table>
         </div>
       </div>
-      <div id="nodes" class="nodes"></div>
     </section>
 
-    <section class="split">
-      <div>
-        <h2>Console</h2>
-        <div class="term" id="term" aria-live="polite"></div>
-        <form id="form" autocomplete="off">
-          <span class="prompt">redis&gt;</span>
-          <input id="input" spellcheck="false" placeholder="SET greeting hello" aria-label="Command">
-        </form>
-        <p class="muted small">Try <code>SET k v</code>, <code>INCR hits</code>, <code>ZADD board 10 alice</code>,
-          <code>ZRANGE board 0 -1 WITHSCORES</code>, <code>INFO replication</code>. Commands go to the current leader.</p>
-      </div>
-      <div>
-        <h2>Event log</h2>
-        <ol id="events" class="events"></ol>
+    <section id="nodes" class="block">
+      <div class="section-head"><h2>Nodes</h2><span class="hint">Polled every 600 ms</span></div>
+      <div class="panel flush">
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr><th>Node</th><th>Address</th><th>Role</th><th class="r">Term</th><th class="r">Commit</th>
+                <th class="r">Applied</th><th class="r">Keys</th><th class="r">p99</th><th>Throughput</th></tr>
+            </thead>
+            <tbody id="node-rows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
-    <section class="facts">
-      <div><b>~400 ms</b><span>failover after a leader dies</span></div>
-      <div><b>0</b><span>acknowledged writes lost in leader-kill tests</span></div>
-      <div><b>400k</b><span>random commands byte-identical to Redis 7</span></div>
-      <div><b>2,000+</b><span>simulated chaos seeds per Raft test run</span></div>
+    <section id="console" class="block">
+      <div class="section-head"><h2>Console</h2><span class="hint">Commands are sent to the current leader</span></div>
+      <div class="grid-console">
+        <div class="terminal">
+          <div class="term-head">
+            <span id="term-title">redis-cli</span>
+            <span class="term-hint">↑ ↓ history</span>
+          </div>
+          <div class="presets" id="presets"></div>
+          <div class="term-out" id="term" aria-live="polite"></div>
+          <form class="term-in" id="form" autocomplete="off">
+            <span class="prompt">&gt;</span>
+            <input id="input" spellcheck="false" placeholder="SET greeting hello" aria-label="Command">
+          </form>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Events</h2><button class="btn-link" id="clear">Clear</button></div>
+          <ol class="events" id="events"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="design" class="block">
+      <div class="section-head"><h2>Design</h2></div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Write path</h2></div>
+          <ol class="steps">
+            <li><b>Route.</b> Any node accepts the connection; followers reply <code>MOVED</code> with the leader's address.</li>
+            <li><b>Append.</b> The leader timestamps the command and appends it to the Raft log.</li>
+            <li><b>Replicate.</b> Followers write the entry to a checksummed WAL and fsync; one fsync covers a batch.</li>
+            <li><b>Commit.</b> Once a majority acknowledges, the entry is committed and applied on every replica.</li>
+            <li><b>Reply.</b> The client receives the result. Reads use ReadIndex and are linearizable.</li>
+          </ol>
+        </div>
+        <div class="panel flush">
+          <div class="panel-head pad"><h2>Verification</h2></div>
+          <table class="data">
+            <thead><tr><th>Check</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>Raft simulator — loss, partitions, crashes, torn writes</td><td class="mono">2,000+ seeds, no violations</td></tr>
+              <tr><td>Linearizability under faults (Jepsen-style)</td><td class="mono">~15k ops, linearizable</td></tr>
+              <tr><td>Acknowledged writes lost on leader kill</td><td class="mono">0 of 823</td></tr>
+              <tr><td>Differential test vs. Redis 7</td><td class="mono">400k commands identical</td></tr>
+              <tr><td>Throughput vs. Redis 7 (pipelined SET)</td><td class="mono">83–95%</td></tr>
+              <tr><td>Failover with production timeouts</td><td class="mono">≈1.3 s</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
   </main>
 
-  <footer class="wrap muted small">
-    Built in Go with no dependencies. Writes are committed by a Raft majority before acknowledgement;
-    reads use ReadIndex, so they are linearizable.
+  <footer class="wrap footer">
+    <span>raft-redis · Go · RESP2 · Raft · no dependencies</span>
+    <span id="clock"></span>
   </footer>
-  <script src="app.js"></script>
+
+  <script src="app.js?v=3"></script>
 </body>
 </html>
