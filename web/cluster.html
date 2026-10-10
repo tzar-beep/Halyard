@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=6">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1c1e'/%3E%3Crect x='4' y='4' width='8' height='8' rx='1' fill='%23ededef'/%3E%3C/svg%3E">
   <script src="config.js?v=3"></script>
 </head>
@@ -48,25 +48,30 @@
         <div class="stat"><span class="label">Last failover</span><span class="value" id="s-failover">—</span></div>
       </div>
 
-      <div class="grid-2">
-        <div class="panel">
+      <div class="grid-topo">
+        <div class="panel topo-panel">
           <div class="panel-head">
-            <h2>Replication topology</h2>
-            <div class="legend"><span><i class="ok"></i>leader</span><span><i class="neutral"></i>follower</span><span><i class="err"></i>unreachable</span></div>
+            <h2>Replication</h2>
+            <div class="legend">
+              <span><i class="pk append"></i>append</span><span><i class="pk beat"></i>heartbeat</span><span><i class="pk ack"></i>ack</span>
+              <span><i class="ok"></i>leader</span><span><i class="err"></i>down</span>
+            </div>
           </div>
-          <svg id="topo" viewBox="0 0 480 260" role="img" aria-label="Replication topology"></svg>
+          <svg id="topo" role="img" aria-label="Replication topology with live traffic"></svg>
+          <div class="pipeline" id="pipeline">
+            <span>Client</span><span>Leader log</span><span>Replicate</span><span>Majority fsync</span><span>Commit</span><span>Apply</span>
+          </div>
         </div>
 
-        <div class="panel">
+        <div class="panel fo-panel">
           <div class="panel-head"><h2>Failover</h2><span class="tag">fault injection</span></div>
-          <p class="note">“Stop leader” freezes the current leader for 5 seconds. The followers stop receiving heartbeats,
-            time out, and elect a replacement. The stopped node rejoins as a follower.</p>
-          <div class="failover" id="fo">
-            <div class="fo-state" id="fo-state">Idle</div>
-            <div class="fo-time" id="fo-time">0.0 s</div>
-            <div class="fo-bar"><i id="fo-bar"></i></div>
-            <div class="fo-sub" id="fo-sub">No failover in progress.</div>
-          </div>
+          <div class="fo-clock"><span id="fo-time">0.00</span><small>s</small></div>
+          <div class="fo-state" id="fo-state">Cluster stable</div>
+          <ol class="stepper" id="stepper">
+            <li>Leader stopped</li><li>Election timeout</li><li>Voting</li><li>New leader</li>
+          </ol>
+          <p class="note" id="fo-sub">“Stop leader” freezes the leader for 5 s. Followers miss heartbeats, time out and elect a replacement.</p>
+          <div class="panel-head mini-head"><h2>Elections</h2></div>
           <table class="mini">
             <thead><tr><th>Term</th><th>Leader</th><th>Observed</th></tr></thead>
             <tbody id="elections"><tr><td colspan="3" class="empty">No elections observed yet.</td></tr></tbody>
@@ -148,6 +153,7 @@
     <span id="clock"></span>
   </footer>
 
-  <script src="app.js?v=3"></script>
+  <script src="topo.js?v=2"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

@@ -71,34 +71,21 @@ $("clear").addEventListener("click", resetEvents);
 resetEvents();
 
 /* ---------- topology ---------- */
-const POS = [[240, 46], [110, 196], [370, 196]];
-const BOX_W = 132, BOX_H = 52;
-
+Topo.init($("topo"), nodes.map((n) => n.name));
+let lastCommitSeen = 0;
 function renderTopo(l) {
-  const roles = nodes.map((n) => role(n, l));
-  let out = "";
-  for (let i = 0; i < nodes.length; i++)
-    for (let j = i + 1; j < nodes.length; j++)
-      out += `<line class="t-edge" x1="${POS[i][0]}" y1="${POS[i][1]}" x2="${POS[j][0]}" y2="${POS[j][1]}"/>`;
-  if (l) {
-    const li = nodes.indexOf(l);
-    nodes.forEach((n, i) => {
-      if (i !== li && roles[i] !== "down")
-        out += `<line class="t-flow" x1="${POS[li][0]}" y1="${POS[li][1]}" x2="${POS[i][0]}" y2="${POS[i][1]}"/>`;
-    });
-  }
-  nodes.forEach((n, i) => {
-    const [cx, cy] = POS[i];
-    const x = cx - BOX_W / 2, y = cy - BOX_H / 2;
-    const r = roles[i];
-    const g = group(n);
-    out += `<rect class="t-box ${r}" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="6"/>
-      <circle class="t-dot ${r}" cx="${x + 16}" cy="${y + 19}" r="3.5"/>
-      <text class="t-name" x="${x + 28}" y="${y + 23}">${n.name}</text>
-      <text class="t-role ${r}" x="${x + BOX_W - 12}" y="${y + 23}" text-anchor="end">${r}</text>
-      <text class="t-meta" x="${x + 16}" y="${y + 41}">${g && r !== "down" ? `term ${g.term} · idx ${num(g.commit)}` : "no heartbeat"}</text>`;
+  const info = nodes.map((n) => {
+    const r = role(n, l), g = group(n);
+    return { role: r, term: g ? g.term : 0, commit: g ? g.commit : 0, applied: g ? g.applied : 0 };
   });
-  $("topo").innerHTML = out;
+  const rate = l ? l.hist[l.hist.length - 1] || 0 : 0;
+  Topo.update(info, l ? nodes.indexOf(l) : -1, rate);
+  const c = l ? group(l).commit : 0;
+  if (c > lastCommitSeen && lastCommitSeen) {
+    const p = $("pipeline");
+    p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash");
+  }
+  lastCommitSeen = c;
 }
 
 /* ---------- nodes table ---------- */
@@ -164,11 +151,11 @@ function track(l) {
   if (kill && l.name !== kill.victim) {
     const ms = Math.round(performance.now() - kill.at);
     clearInterval(kill.timer);
-    $("fo").className = "failover done";
-    $("fo-state").textContent = `Recovered — ${l.name} is leader`;
-    $("fo-time").textContent = `${(ms / 1000).toFixed(2)} s`;
-    $("fo-bar").style.width = "100%";
-    $("fo-sub").textContent = `${kill.victim} was unreachable; the remaining majority elected ${l.name} in term ${term}.`;
+    $("fo-time").textContent = (ms / 1000).toFixed(2);
+    setStep(4);
+    $("fo-state").className = "fo-state done";
+    $("fo-state").textContent = `Recovered — ${l.name} leads term ${term}`;
+    $("fo-sub").textContent = `${kill.victim} stopped answering; the remaining majority elected ${l.name}. ${kill.victim} rejoins as a follower.`;
     $("s-failover").textContent = `${ms} ms`;
     event(`failover completed in ${ms} ms`);
     const victim = kill.victim;
@@ -178,19 +165,24 @@ function track(l) {
   lastTerm = term;
 }
 
+function setStep(n) {
+  [...$("stepper").children].forEach((li, i) => { li.className = i + 1 < n || n === 4 ? "done" : i + 1 === n ? "active" : ""; });
+}
+
 async function stopLeader() {
   const l = leader();
   if (!l || kill) return;
-  kill = { at: performance.now(), victim: l.name };
+  kill = { at: performance.now(), victim: l.name, term: group(l).term };
   $("kill").disabled = true;
-  $("fo").className = "failover active";
-  $("fo-state").textContent = `${l.name} stopped — election pending`;
-  $("fo-sub").textContent = "Followers wait for the randomized election timeout, then vote.";
+  $("fo-state").className = "fo-state active";
+  $("fo-state").textContent = `${l.name} stopped — followers waiting`;
+  setStep(1);
   event(`${l.name} stopped by operator (${PAUSE_S} s)`, "err");
   kill.timer = setInterval(() => {
     const s = (performance.now() - kill.at) / 1000;
-    $("fo-time").textContent = `${s.toFixed(1)} s`;
-    $("fo-bar").style.width = `${Math.min(100, (s / 3) * 100)}%`;
+    $("fo-time").textContent = s.toFixed(2);
+    const voting = nodes.some((n) => { const g = group(n); return g && !frozen(n) && (g.term > kill.term || g.state.includes("candidate")); });
+    setStep(voting ? 3 : s > 0.15 ? 2 : 1);
   }, 50);
   try {
     await fetch(l.url + "/api/fault", {
