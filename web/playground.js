@@ -43,6 +43,7 @@
   for (let a = 0; a < N; a++) for (let b = a + 1; b < N; b++)
     el("line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1] }, mesh);
   const msgPool = [];
+  let msgPos = [];
 
   function openMenu(id, x, y) {
     if (!view) return;
@@ -106,6 +107,7 @@
   function drawMsgs() {
     const t = view.tick + frac;
     let k = 0;
+    msgPos = [];
     for (const m of view.msgs) {
       const spec = MSG[m.type] || ["hb", 3];
       const p = Math.min(1, Math.max(0, (t - m.sent) / Math.max(1, m.due - m.sent)));
@@ -113,8 +115,10 @@
       const c = msgPool[k] || (msgPool[k] = el("circle", {}, msgLayer));
       c.setAttribute("class", `pm ${spec[0]}${m.fail ? " fail" : ""}`);
       c.setAttribute("r", spec[1]);
-      c.setAttribute("cx", (x1 + (x2 - x1) * p).toFixed(1));
-      c.setAttribute("cy", (y1 + (y2 - y1) * p).toFixed(1));
+      const mx = x1 + (x2 - x1) * p, my = y1 + (y2 - y1) * p;
+      msgPos.push({ m, x: mx, y: my });
+      c.setAttribute("cx", mx.toFixed(1));
+      c.setAttribute("cy", my.toFixed(1));
       c.style.display = "";
       k++;
     }
@@ -157,7 +161,7 @@
     acc += dt * speed;
     let steps = 0;
     while (acc >= 1 && steps < 8) { acc -= 1; steps++; }
-    if (steps) { api.step(steps); refresh(); }
+    if (steps) { api.step(steps); refresh(); runScenario(); }
   }, 30);
 
   function frame() {
@@ -185,11 +189,104 @@
   $("#pg-reset").addEventListener("click", () => reset(parseInt($("#pg-seed").value, 10) || 1));
   $("#pg-random").addEventListener("click", () => reset(Math.floor(Math.random() * 100000)));
 
+
+  // ---------- hover tooltips: what is inside each RPC ----------
+  const tip = $("#pg-tip");
+  const describe = (m) => {
+    const dir = `n${m.from} → n${m.to}`;
+    const drop = m.fail ? " · will be dropped" : "";
+    switch (m.type) {
+      case "App": return [`AppendEntries ${dir}`, `term ${m.term} · prev ${m.index || 0}@${m.logTerm || 0} · ${m.entries || 0} entr${m.entries === 1 ? "y" : "ies"} · leader commit ${m.commit || 0}${drop}`];
+      case "AppResp": return [`AppendEntries ${m.reject ? "rejected" : "ack"} ${dir}`, m.reject ? `term ${m.term} · conflict near index ${m.index || 0}${drop}` : `term ${m.term} · replicated up to ${m.index || 0}${drop}`];
+      case "Heartbeat": return [`Heartbeat ${dir}`, `term ${m.term} · commit ${m.commit || 0}${drop}`];
+      case "HeartbeatResp": return [`Heartbeat ack ${dir}`, `term ${m.term}${drop}`];
+      case "PreVote": case "Vote": return [`${m.type === "PreVote" ? "PreVote" : "RequestVote"} ${dir}`, `term ${m.term} · candidate's last log ${m.index || 0}@${m.logTerm || 0}${drop}`];
+      case "PreVoteResp": case "VoteResp": return [`${m.reject ? "Vote denied" : "Vote granted"} ${dir}`, `term ${m.term}${drop}`];
+      case "Snap": return [`InstallSnapshot ${dir}`, `term ${m.term}${drop}`];
+      default: return [`${m.type} ${dir}`, `term ${m.term}${drop}`];
+    }
+  };
+  const pointer = (e) => {
+    const b = svg.getBoundingClientRect();
+    return [((e.clientX - b.left) / b.width) * 520, ((e.clientY - b.top) / b.height) * 430, e.clientX - b.left, e.clientY - b.top];
+  };
+  svg.addEventListener("mousemove", (e) => {
+    if (!view) return;
+    const [x, y, px, py] = pointer(e);
+    let best = null, bd = 14;
+    for (const p of msgPos) { const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = p.m; } }
+    let lines = null;
+    if (best) lines = describe(best);
+    else {
+      const i = pos.findIndex(([nx, ny]) => Math.hypot(nx - x, ny - y) < 40);
+      if (i >= 0) {
+        const n = view.nodes[i];
+        lines = n.up
+          ? [`n${n.id} · ${n.state}${n.isolated ? " · partitioned" : ""}`, `term ${n.term}${n.vote ? ` · voted n${n.vote}` : ""} · log up to ${n.last} · commit ${n.commit}${n.state !== "leader" ? ` · timer ${n.elapsed}/${n.timeout}` : ""}`]
+          : [`n${n.id} · down`, "crashed — click to restart from disk"];
+      }
+    }
+    if (!lines) { tip.hidden = true; return; }
+    tip.innerHTML = `<b></b><span></span>`;
+    tip.firstChild.textContent = lines[0];
+    tip.lastChild.textContent = lines[1];
+    tip.hidden = false;
+    const b = svg.getBoundingClientRect();
+    tip.style.left = `${Math.min(px + 14, b.width - 280)}px`;
+    tip.style.top = `${Math.max(8, py - 54)}px`;
+  });
+  svg.addEventListener("mouseleave", () => { tip.hidden = true; });
+
+  // ---------- auto-played scenario ----------
+  // Runs on load so the cluster tells its own story; any user action hands control over.
+  let scenario = null;
+  const banner = $("#pg-scenario");
+  function startScenario() {
+    scenario = { phase: 0, at: 0, crashed: 0, isolated: 0 };
+    banner.hidden = false;
+  }
+  function stopScenario() {
+    if (!scenario) return;
+    scenario = null;
+    banner.hidden = true;
+  }
+  function say(text) { banner.querySelector("span").textContent = text; }
+  function runScenario() {
+    if (!scenario || !view) return;
+    const s = scenario, t = view.tick, L = view.leader;
+    const next = (delay) => { s.phase++; s.at = t + delay; };
+    if (t < s.at) return;
+    switch (s.phase) {
+      case 0: say("Five nodes start as followers. Watch the election timers fill up…"); if (L) next(10); break;
+      case 1: say(`n${L} won the election. A client writes; the leader replicates the entry to a majority.`); api.propose(""); next(10); break;
+      case 2: api.propose(""); next(10); break;
+      case 3: api.propose(""); say("Each entry turns solid in the log grid once a majority has it — that is the commit point."); next(36); break;
+      case 4: s.crashed = L; api.crash(L); say(`Now the leader n${L} crashes. Followers stop hearing heartbeats…`); next(4); break;
+      case 5: if (L && L !== s.crashed) { say(`n${L} won a new election in term ${view.nodes[L - 1].term}. No committed entry was lost.`); next(28); } break;
+      case 6: api.propose(""); api.restart(s.crashed); say(`n${s.crashed} restarts from its disk and catches up from the new leader.`); next(50); break;
+      case 7: {
+        const f = view.nodes.find((n) => n.up && n.id !== L && n.id !== s.crashed);
+        if (f) { s.isolated = f.id; api.isolate(f.id); say(`n${f.id} is cut off by a network partition. The majority keeps committing without it.`); }
+        next(8); break;
+      }
+      case 8: api.propose(""); next(12); break;
+      case 9: api.propose(""); next(40); break;
+      case 10: api.isolate(s.isolated); say(`The partition heals; n${s.isolated} rejoins and its log is repaired. Your turn — click any node.`); next(70); break;
+      case 11: stopScenario(); break;
+    }
+    refresh();
+  }
+  banner.querySelector("button").addEventListener("click", stopScenario);
+  // Any manual control ends the scenario.
+  root.querySelector(".pg-bar").addEventListener("click", (e) => { if (e.target.closest("button")) stopScenario(); }, true);
+  $("#pg-menu").addEventListener("click", stopScenario, true);
+
   // Load the wasm module.
   addEventListener("halyard-ready", () => {
     api = window.halyardRaft;
     root.classList.add("ready");
     reset(seed);
+    startScenario();
   }, { once: true });
   const go = new Go();
   WebAssembly.instantiateStreaming(fetch("raft.wasm"), go.importObject)

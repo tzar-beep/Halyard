@@ -8,13 +8,15 @@
   <meta property="og:title" content="Halyard — a Redis-compatible database replicated with Raft">
   <meta property="og:description" content="Run Halyard's real Raft implementation in your browser: crash nodes, cut the network, and watch it recover.">
   <meta property="og:type" content="website">
-  <meta name="twitter:card" content="summary">
+  <meta name="twitter:card" content="summary_large_image">
   <meta name="theme-color" content="#0f0f10">
+  <meta property="og:image" content="og.png">
+  <meta name="twitter:image" content="og.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css?v=10">
-  <link rel="stylesheet" href="landing.css?v=10">
+  <link rel="stylesheet" href="landing.css?v=12">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1c1e'/%3E%3Crect x='4' y='4' width='8' height='8' rx='1' fill='%23ededef'/%3E%3C/svg%3E">
   <script src="wasm_exec.js"></script>
 </head>
@@ -39,10 +41,9 @@
       <p class="eyebrow">Redis protocol · Raft consensus · Go, no dependencies</p>
       <h1>A Redis-compatible database that keeps every acknowledged write when its servers die.</h1>
       <div class="intro-grid">
-        <p class="lede">Halyard speaks RESP, so <code>redis-cli</code> and existing client libraries work unchanged.
-          Underneath, every write is replicated with a from-scratch Raft implementation and acknowledged only after a
-          majority has it on disk. Below is that Raft code — the production package, compiled to WebAssembly — running
-          a five-node cluster in your browser.</p>
+        <p class="lede">It speaks the Redis protocol, so <code>redis-cli</code> and existing clients just work. Every write
+          is replicated with Raft and acknowledged only once a majority has it on disk.</p>
+        <p class="lede strong">Below: Halyard's actual Raft code, compiled to WebAssembly, running five nodes in your browser.</p>
         <dl class="facts">
           <div><dt>Failover</dt><dd>≈ 400 ms</dd></div>
           <div><dt>Acked writes lost</dt><dd>0 / 823</dd></div>
@@ -84,6 +85,8 @@
             <div class="pg-status">
               <span>tick <b id="pg-tick">0</b></span><span>leader <b id="pg-leader">—</b></span><span>seed <b id="pg-seed-now">—</b></span>
             </div>
+            <div class="pg-tip" id="pg-tip" hidden></div>
+            <div class="pg-scenario" id="pg-scenario" hidden><span>Starting…</span><button type="button">Take over</button></div>
             <div class="pg-loading" id="pg-loading">Loading Raft (WebAssembly)…</div>
           </div>
           <aside class="pg-side">
@@ -102,8 +105,11 @@
           <div class="pg-log" id="pg-log"></div>
         </div>
       </div>
-      <p class="caption">Click a node to crash it or cut it off. The cluster runs on a virtual clock, so a seed plus your
-        actions replays exactly — the same property Halyard's test suite uses to check thousands of failure schedules.</p>
+      <div class="pg-after">
+        <p class="caption">Hover any message to see what's inside it. Click a node to crash it or cut it off. Runs replay
+          exactly from their seed — the property the test suite uses to check thousands of failure schedules.</p>
+        <a class="bridge" href="cluster.html#tour">Now break a real cluster over TCP →</a>
+      </div>
     </section>
 
     <section class="wrap block-lg" id="failover">
@@ -195,7 +201,7 @@ redis-cli -c -h h1 CLUSTER MIGRATE 5000 2   <span class="m"># move a slot while 
     <span><a href="cluster.html">Live cluster</a> · <a href="https://github.com/tzar-beep" target="_blank" rel="noopener">GitHub</a></span>
   </footer>
 
-  <script src="playground.js?v=3"></script>
+  <script src="playground.js?v=4"></script>
   <script src="landing.js?v=10"></script>
 </body>
 </html>

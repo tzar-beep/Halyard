@@ -165,3 +165,18 @@ code { white-space: nowrap; }
   .tl-marks div { font-size: 11px; max-width: 110px; }
   .nav-link { display: none; }
 }
+
+/* tooltips, scenario, bridge */
+.pg-tip { position: absolute; z-index: 6; pointer-events: none; max-width: 300px; background: #1d1d20; border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px 10px; box-shadow: 0 12px 30px -10px rgba(0,0,0,.8); }
+.pg-tip b { display: block; font: 500 12.5px var(--mono); color: var(--text); }
+.pg-tip span { display: block; font: 11.5px var(--mono); color: var(--text-2); margin-top: 3px; }
+.pg-scenario { position: absolute; bottom: 40px; left: 12px; right: 12px; display: flex; align-items: center; gap: 12px; justify-content: space-between; background: rgba(22, 22, 23, .92); border: 1px solid var(--border-strong); border-radius: 8px; padding: 9px 12px; font-size: 13px; color: var(--text); backdrop-filter: blur(6px); }
+.pg-scenario span::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 9px; vertical-align: 1px; animation: led 1.2s ease-in-out infinite; }
+.pg-scenario button { flex: none; background: none; border: 1px solid var(--border-strong); color: var(--text-2); border-radius: 5px; padding: 3px 9px; font: 12px var(--sans); cursor: pointer; }
+.pg-scenario button:hover { color: var(--text); }
+.lede.strong { color: var(--text); margin-top: 12px; }
+.pg-after { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-top: 12px; }
+.pg-after .caption { margin: 0; }
+.bridge { flex: none; font-weight: 500; font-size: 13.5px; color: var(--text); border-bottom: 1px solid var(--border-strong); padding-bottom: 2px; }
+.bridge:hover { border-color: var(--text); }
+@media (max-width: 960px) { .pg-after { flex-direction: column; } }

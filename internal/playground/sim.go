@@ -251,6 +251,13 @@ type MsgView struct {
 	Sent int    `json:"sent"`
 	Due  int    `json:"due"`
 	Fail bool   `json:"fail"` // will be dropped (partition or dead receiver)
+	// RPC contents, for tooltips.
+	Term    uint64 `json:"term"`
+	Index   uint64 `json:"index,omitempty"`
+	LogTerm uint64 `json:"logTerm,omitempty"`
+	Commit  uint64 `json:"commit,omitempty"`
+	Entries int    `json:"entries,omitempty"`
+	Reject  bool   `json:"reject,omitempty"`
 }
 
 type View struct {
@@ -288,7 +295,8 @@ func (s *Sim) View() View {
 	}
 	for _, f := range s.net {
 		v.Msgs = append(v.Msgs, MsgView{From: int(f.m.From), To: int(f.m.To), Type: f.m.Type.String(),
-			Sent: f.sent, Due: f.due, Fail: !s.reachable(f.m.From, f.m.To) || !s.nodes[f.m.To-1].up})
+			Sent: f.sent, Due: f.due, Fail: !s.reachable(f.m.From, f.m.To) || !s.nodes[f.m.To-1].up,
+			Term: f.m.Term, Index: f.m.Index, LogTerm: f.m.LogTerm, Commit: f.m.Commit, Entries: len(f.m.Entries), Reject: f.m.Reject})
 	}
 	return v
 }
