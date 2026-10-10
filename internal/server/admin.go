@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tzar-beep/redis/internal/cluster"
@@ -158,9 +159,12 @@ func (s *Server) startHTTP(addr string) error {
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok\n") })
 	mux.HandleFunc("/api/status", s.cors(s.apiStatus))
+	mux.HandleFunc("/api/log", s.cors(s.apiLog))
+	mux.HandleFunc("/api/slots", s.cors(s.apiSlots))
 	if s.cfg.Demo {
 		mux.HandleFunc("/api/command", s.cors(s.limit(s.apiCommand)))
 		mux.HandleFunc("/api/fault", s.cors(s.limit(s.apiFault)))
+		mux.HandleFunc("/api/load", s.cors(s.limit(s.apiLoad)))
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -290,8 +294,14 @@ func (s *Server) apiCommand(w http.ResponseWriter, r *http.Request) {
 		sess := command.Session{Authed: true, Role: command.RoleWrite, User: "web"}
 		if name == "info" {
 			s.info(rw, args)
-		} else if err := s.h.Dispatch(rw, &sess, args); err != nil {
-			rw.Error("ERR " + err.Error())
+		} else {
+			t0 := time.Now()
+			if err := s.h.Dispatch(rw, &sess, args); err != nil {
+				rw.Error("ERR " + err.Error())
+			}
+			n, known := command.Name(args[0])
+			metrics.CommandLatency.Observe(time.Since(t0))
+			metrics.CountCommand(n, known)
 		}
 		rw.Flush()
 		reply = Render(bufio.NewReader(&buf), "")
@@ -307,16 +317,111 @@ func (s *Server) apiFault(w http.ResponseWriter, r *http.Request) {
 		Action  string `json:"action"`
 		Seconds int    `json:"seconds"`
 	}
-	if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&req) != nil || req.Action != "pause" {
+	if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&req) != nil ||
+		(req.Action != "pause" && req.Action != "isolate") || len(s.raftGroups()) == 0 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	d := time.Duration(max(1, min(req.Seconds, 15))) * time.Second
-	for _, g := range s.raftGroups() {
-		g.node.Pause(d)
+	if req.Action == "isolate" {
+		// Network partition: the node keeps running but can't reach anyone.
+		s.raftGroups()[0].node.Isolate(d)
+	} else {
+		for _, g := range s.raftGroups() {
+			g.node.Pause(d)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"paused": d.Seconds()})
+	json.NewEncoder(w).Encode(map[string]any{"action": req.Action, "seconds": d.Seconds()})
+}
+
+// apiLoad: {"count":1000} runs that many writes through the normal command path
+// with 32 concurrent workers and reports throughput (demo load generator).
+func (s *Server) apiLoad(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Count int `json:"count"`
+	}
+	if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 256)).Decode(&req) != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	n := max(1, min(req.Count, 2000))
+	var ok, failed atomic.Int64
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+	start := time.Now()
+	for k := 0; k < 32; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sess := command.Session{Authed: true, Role: command.RoleWrite, User: "load"}
+			var buf bytes.Buffer
+			for i := range jobs {
+				buf.Reset()
+				rw := resp.NewWriter(&buf)
+				args := [][]byte{[]byte("SET"), []byte("load:" + strconv.Itoa(i%200)), []byte(strconv.Itoa(i))}
+				t0 := time.Now()
+				if err := s.h.Dispatch(rw, &sess, args); err != nil {
+					failed.Add(1)
+					continue
+				}
+				metrics.CommandLatency.Observe(time.Since(t0))
+				metrics.CountCommand("set", true)
+				rw.Flush()
+				if bytes.HasPrefix(buf.Bytes(), []byte("+OK")) {
+					ok.Add(1)
+				} else {
+					failed.Add(1)
+				}
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	el := time.Since(start)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": ok.Load(), "failed": failed.Load(), "ms": el.Milliseconds(),
+		"opsPerSec": int(float64(ok.Load()) / max(el.Seconds(), 0.001))})
+}
+
+// apiLog: the most recent Raft log entries of the metadata/only group.
+func (s *Server) apiLog(w http.ResponseWriter, _ *http.Request) {
+	groups := s.raftGroups()
+	if len(groups) == 0 {
+		http.Error(w, "not in cluster mode", http.StatusNotFound)
+		return
+	}
+	g := groups[len(groups)-1] // in sharded mode, show a data group
+	if len(groups) == 1 {
+		g = groups[0]
+	}
+	st := g.node.CurrentStatus()
+	type ent struct {
+		Index uint64 `json:"index"`
+		Term  uint64 `json:"term"`
+		Kind  string `json:"kind"`
+		Desc  string `json:"desc"`
+	}
+	var out []ent
+	for _, e := range g.node.RecentEntries(12) {
+		kind, desc := cluster.DescribeEntry(e)
+		out = append(out, ent{e.Index, e.Term, kind, desc})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"group": g.id, "commit": st.Commit, "applied": st.Applied, "entries": out})
+}
+
+// apiSlots: slot ranges and owning groups (sharded mode).
+func (s *Server) apiSlots(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.router == nil {
+		json.NewEncoder(w).Encode(map[string]any{"sharded": false})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"sharded": true, "ranges": s.router.SlotRanges()})
 }
 
 // Render formats a RESP reply like redis-cli.

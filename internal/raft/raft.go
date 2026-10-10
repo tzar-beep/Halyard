@@ -213,6 +213,13 @@ func (r *Raft) Voters() []NodeID  { return sortedIDs(r.voters) }
 
 // LatestSnapshot returns the most recent snapshot (local or installed), or nil.
 func (r *Raft) LatestSnapshot() *Snapshot { return r.snapshot }
+
+// RecentEntries returns up to k of the newest log entries (not compacted).
+func (r *Raft) RecentEntries(k int) []Entry {
+	hi := r.log.lastIndex() + 1
+	lo := max(r.log.snapIndex+1, hi-uint64(min(k, int(hi))))
+	return r.log.slice(lo, hi)
+}
 func (r *Raft) hardState() HardState {
 	return HardState{Term: r.term, Vote: r.vote, Commit: r.log.committed}
 }

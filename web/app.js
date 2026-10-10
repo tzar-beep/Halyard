@@ -142,6 +142,8 @@ function renderElections() {
 
 function track(l) {
   $("kill").disabled = !l || !!kill;
+  $("iso-btn").disabled = !l || !!kill;
+  $("load-btn").disabled = !l;
   if (!l) return;
   const term = group(l).term;
   if (l.name === lastLeader && term === lastTerm) return;
@@ -169,15 +171,15 @@ function setStep(n) {
   [...$("stepper").children].forEach((li, i) => { li.className = i + 1 < n || n === 4 ? "done" : i + 1 === n ? "active" : ""; });
 }
 
-async function stopLeader() {
+async function stopLeader(action = "pause") {
   const l = leader();
   if (!l || kill) return;
   kill = { at: performance.now(), victim: l.name, term: group(l).term };
   $("kill").disabled = true;
   $("fo-state").className = "fo-state active";
-  $("fo-state").textContent = `${l.name} stopped — followers waiting`;
+  $("fo-state").textContent = action === "isolate" ? `${l.name} partitioned — majority waiting` : `${l.name} stopped — followers waiting`;
   setStep(1);
-  event(`${l.name} stopped by operator (${PAUSE_S} s)`, "err");
+  event(action === "isolate" ? `${l.name} cut off from the network (${PAUSE_S} s)` : `${l.name} stopped by operator (${PAUSE_S} s)`, "err");
   kill.timer = setInterval(() => {
     const s = (performance.now() - kill.at) / 1000;
     $("fo-time").textContent = s.toFixed(2);
@@ -187,7 +189,7 @@ async function stopLeader() {
   try {
     await fetch(l.url + "/api/fault", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "pause", seconds: PAUSE_S }),
+      body: JSON.stringify({ action, seconds: PAUSE_S }),
     });
   } catch {
     clearInterval(kill.timer);
@@ -195,7 +197,7 @@ async function stopLeader() {
     event("could not reach the leader", "err");
   }
 }
-$("kill").addEventListener("click", stopLeader);
+$("kill").addEventListener("click", () => stopLeader("pause"));
 
 /* ---------- loop ---------- */
 function render() {

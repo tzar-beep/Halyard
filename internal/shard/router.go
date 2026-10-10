@@ -491,6 +491,15 @@ func (r *Router) internalCmd(w *resp.Writer, name string, args [][]byte) {
 	}
 }
 
+// SlotRanges reports slot ownership with each owner's current leader address.
+func (r *Router) SlotRanges() []map[string]any {
+	var out []map[string]any
+	for _, rg := range r.metaSM.Ranges() {
+		out = append(out, map[string]any{"start": rg.Start, "end": rg.End, "group": rg.Owner, "leader": r.leaderAddr(rg.Owner)})
+	}
+	return out
+}
+
 // StatusOf returns the local replica's Raft status line for group g.
 func (r *Router) StatusOf(g uint32) string {
 	st := r.node(g).CurrentStatus()

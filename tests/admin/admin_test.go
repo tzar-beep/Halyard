@@ -190,6 +190,33 @@ func TestDemoAPIKillLeader(t *testing.T) {
 	if got := post(https[li], "/api/command", `{"args":["FLUSHALL"]}`)["reply"]; !strings.Contains(fmt.Sprint(got), "disabled") {
 		t.Fatalf("FLUSHALL not blocked: %v", got)
 	}
+	if got := post(https[li], "/api/load", `{"count":300}`); got["ok"] != float64(300) {
+		t.Fatalf("load: %v", got)
+	}
+	r, err := http.Get("http://" + https[li] + "/api/log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lg struct {
+		Entries []struct{ Kind, Desc string } `json:"entries"`
+	}
+	json.NewDecoder(r.Body).Decode(&lg)
+	r.Body.Close()
+	if len(lg.Entries) == 0 || !strings.HasPrefix(lg.Entries[len(lg.Entries)-1].Desc, "SET load:") {
+		t.Fatalf("log: %+v", lg)
+	}
+	// A partitioned leader must step down; then use pause for the failover check.
+	post(https[li], "/api/fault", `{"action":"isolate","seconds":2}`)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if nl, nt := leader(); nl >= 0 && nl != li && nt > term {
+			li, term = nl, nt
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no new leader after isolating the old one")
+		}
+	}
+	time.Sleep(2500 * time.Millisecond) // partition heals
 	post(https[li], "/api/fault", `{"action":"pause","seconds":3}`)
 	start := time.Now()
 	for {

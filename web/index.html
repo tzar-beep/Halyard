@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Halyard — Redis-compatible, replicated with Raft</title>
   <meta name="description" content="Halyard is a Redis-compatible database written from scratch in Go. Raft replication, sharding and linearizability-checked fault tolerance. Works with redis-cli.">
+  <meta property="og:title" content="Halyard — the Redis protocol, without losing writes">
+  <meta property="og:description" content="A Redis-compatible database written from scratch in Go and replicated with Raft. Stop the leader and watch it fail over live.">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <meta name="theme-color" content="#0f0f10">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -22,6 +27,7 @@
         <a href="#correctness">Correctness</a>
         <a href="#performance">Performance</a>
         <a href="#start">Get started</a>
+        <a href="story.html">Engineering notes</a>
       </nav>
       <a class="btn btn-primary nav-cta" href="cluster.html">Live cluster →</a>
     </div>
@@ -38,7 +44,7 @@
         confirmed write disappears.</p>
       <div class="hero-cta">
         <a class="btn btn-primary btn-lg" href="cluster.html">Open the live cluster</a>
-        <a class="btn btn-lg" href="#start">Run it locally</a>
+        <a class="btn btn-lg" href="cluster.html#tour">Take the guided tour</a>
       </div>
     </div>
     <div class="globe-wrap" aria-hidden="true">

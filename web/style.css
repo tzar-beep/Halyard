@@ -293,3 +293,60 @@ tbody tr:hover td { background: rgba(255, 255, 255, 0.015); }
   .fo-strip, .fo-row { grid-template-columns: 1fr; }
   .track span { font-size: 10px; }
 }
+
+/* ===== actions, log viewer, charts, slots, tour ===== */
+.actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.btn-warn { color: var(--warn); border-color: rgba(210, 153, 34, .45); }
+.btn-warn:hover:not(:disabled) { background: rgba(210, 153, 34, .1); border-color: var(--warn); }
+.btn-primary { background: var(--text); color: #0f0f10; border-color: var(--text); }
+.btn-primary:hover:not(:disabled) { background: #d6d6d9; }
+
+.log-panel { margin-top: 16px; }
+.logcols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.logcol { border: 1px solid var(--border); border-radius: 6px; background: #121213; min-width: 0; }
+.logcol.leader { border-color: rgba(63, 185, 80, .45); }
+.logcol.down { border-color: rgba(240, 82, 79, .4); }
+.logcol-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); font: 500 13px var(--mono); }
+.logcol ol { list-style: none; margin: 0; padding: 4px 0; height: 300px; overflow: hidden; }
+.logcol li { display: grid; grid-template-columns: 44px 34px 1fr; gap: 8px; padding: 4px 12px; font: 12px var(--mono); align-items: center; }
+.logcol li.fresh { animation: lgin .8s ease-out; }
+@keyframes lgin { from { background: rgba(63, 185, 80, .12); } }
+.logcol li.pending { opacity: .4; }
+.logcol li.noop .lg-desc { color: var(--text-3); font-style: italic; }
+.logcol li.conf .lg-desc { color: var(--warn); }
+.lg-idx { color: var(--text-3); text-align: right; }
+.lg-term { text-align: center; border-radius: 3px; font-size: 11px; padding: 0 3px; color: #0f0f10; }
+.lg-term.t0 { background: #8b949e; } .lg-term.t1 { background: #3fb950; } .lg-term.t2 { background: #6f8cff; }
+.lg-term.t3 { background: #d29922; } .lg-term.t4 { background: #c678dd; } .lg-term.t5 { background: #56b6c2; }
+.lg-desc { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-empty { color: var(--err) !important; font-family: var(--sans) !important; padding: 12px !important; display: block !important; }
+
+.charts { margin-top: 16px; }
+.chart { display: block; width: 100%; height: 160px; background: #121213; border: 1px solid var(--border); border-radius: 6px; }
+.ch-grid { stroke: #1f1f22; stroke-width: 1; }
+.ch-line { fill: none; stroke: #d8d8dc; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.ch-area { fill: rgba(216, 216, 220, .06); }
+.ch-dot { fill: var(--ok); }
+.ch-max { font: 11px var(--mono); fill: var(--text-3); }
+.ch-mark { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.ch-mark-t { font: 10.5px var(--mono); fill: var(--warn); }
+
+#slotmap { width: 100%; height: auto; display: block; image-rendering: pixelated; border-radius: 4px; }
+.slot-legend { display: flex; gap: 18px; margin-top: 10px; font-size: 12.5px; color: var(--text-2); flex-wrap: wrap; }
+.slot-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+
+.tour { position: fixed; inset: auto 24px 24px auto; z-index: 50; }
+.tour-card { width: 360px; background: #1a1a1c; border: 1px solid var(--border-strong); border-radius: 10px; padding: 18px 18px 14px; box-shadow: 0 24px 60px -20px rgba(0,0,0,.8); }
+.tour-step { font: 500 11px var(--mono); color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; }
+.tour-card h3 { margin: 6px 0 6px; font-size: 16px; }
+.tour-card p { margin: 0 0 14px; color: var(--text-2); font-size: 13.5px; }
+.tour-actions { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; }
+.tour-target { outline: 2px solid var(--ok); outline-offset: 4px; border-radius: 8px; transition: outline-color .3s; }
+
+@media (max-width: 960px) {
+  .logcols { grid-template-columns: 1fr; }
+  .logcol ol { height: 180px; }
+  .tour { inset: auto 12px 12px 12px; } .tour-card { width: auto; }
+  #topo { min-width: 760px; }
+  .topo-panel { overflow-x: auto; }
+}

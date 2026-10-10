@@ -111,6 +111,7 @@ type Node struct {
 	tr     *transport
 	xferc  chan raft.NodeID
 	pausec chan time.Duration
+	logc   chan logReq
 
 	propc chan *proposal
 	readc chan *readReq
@@ -223,7 +224,7 @@ func (h *Host) StartGroup(group uint32, cfg Config, sm StateMachine) (*Node, err
 	}
 	n := &Node{
 		cfg: cfg, group: group, host: h, tr: h.tr, sm: sm, wal: w,
-		xferc: make(chan raft.NodeID, 1), pausec: make(chan time.Duration, 1),
+		xferc: make(chan raft.NodeID, 1), pausec: make(chan time.Duration, 1), logc: make(chan logReq),
 		propc: make(chan *proposal, 1024), readc: make(chan *readReq, 1024),
 		recvc: make(chan raft.Message, 4096),
 		stopc: make(chan struct{}), donec: make(chan struct{}),
@@ -265,6 +266,66 @@ func (n *Node) Pause(d time.Duration) {
 	case n.pausec <- d:
 	default:
 	}
+}
+
+type logReq struct {
+	k   int
+	out chan []raft.Entry
+}
+
+// RecentEntries returns this replica's newest log entries (for the demo UI).
+func (n *Node) RecentEntries(k int) []raft.Entry {
+	q := logReq{k, make(chan []raft.Entry, 1)}
+	select {
+	case n.logc <- q:
+	case <-time.After(time.Second):
+		return nil
+	}
+	select {
+	case e := <-q.out:
+		return e
+	case <-time.After(time.Second):
+		return nil
+	}
+}
+
+// Isolate cuts this host off the network (all groups) for d: a partition rather
+// than a crash. The node keeps running, so a leader steps down via CheckQuorum.
+func (n *Node) Isolate(d time.Duration) {
+	self := n.cfg.Self.ID
+	n.host.SetFilter(func(from, to raft.NodeID) bool { return from != self && to != self })
+	time.AfterFunc(d, func() { n.host.SetFilter(nil) })
+}
+
+// DescribeEntry renders a log entry for humans: kind and a short description.
+func DescribeEntry(e raft.Entry) (kind, desc string) {
+	switch {
+	case e.Type == raft.EntryConfChange:
+		cc, err := raft.UnmarshalConfChange(e.Data)
+		if err != nil {
+			return "conf", "?"
+		}
+		op := "add"
+		if cc.Type == raft.RemoveNode {
+			op = "remove"
+		}
+		return "conf", fmt.Sprintf("%s node %d", op, cc.Node)
+	case e.Data == nil:
+		return "noop", "leader no-op"
+	}
+	_, args, err := decodeCommand(e.Data)
+	if err != nil {
+		return "cmd", "?"
+	}
+	parts := make([]string, len(args))
+	for i, a := range args {
+		parts[i] = string(a)
+	}
+	s := strings.Join(parts, " ")
+	if len(s) > 48 {
+		s = s[:45] + "..."
+	}
+	return "cmd", s
 }
 
 // Pause pauses every group on this host.
@@ -335,6 +396,8 @@ func (n *Node) run() {
 			n.startProposal(p)
 		case to := <-n.xferc:
 			n.r.TransferLeadership(to)
+		case q := <-n.logc:
+			q.out <- n.r.RecentEntries(q.k)
 		case d := <-n.pausec:
 			log.Printf("raft node %d group %d: paused for %v", n.cfg.Self.ID, n.group, d)
 			timer := time.NewTimer(d)
