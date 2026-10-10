@@ -3,7 +3,13 @@ services:
   redis:
     build: .
     restart: unless-stopped
+    command: ["-appendfsync", "everysec"]
     ports:
       - "6379:6379"
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:

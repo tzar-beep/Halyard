@@ -20,7 +20,10 @@ func startWith(t *testing.T, cfg server.Config) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := server.New(cfg)
+	s, err := server.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	go s.Serve(ln)
 	t.Cleanup(func() { s.Close() })
 	return ln.Addr().String()

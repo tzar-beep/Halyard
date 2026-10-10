@@ -6,9 +6,12 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/tzar-beep/redis/internal/command"
+	"github.com/tzar-beep/redis/internal/persistence"
 	"github.com/tzar-beep/redis/internal/resp"
 	"github.com/tzar-beep/redis/internal/store"
 )
@@ -17,6 +20,7 @@ type Server struct {
 	addr  string
 	store *store.Store
 	disp  *command.Dispatcher
+	aof   *persistence.AOF // nil when persistence is disabled
 
 	mu    sync.Mutex
 	ln    net.Listener
@@ -26,18 +30,38 @@ type Server struct {
 }
 
 type Config struct {
-	Addr     string
-	Password string // empty disables AUTH
+	Addr        string
+	Password    string // empty disables AUTH
+	Dir         string // data directory
+	AppendOnly  bool
+	AppendFsync persistence.Policy
 }
 
-func New(cfg Config) *Server {
+const aofName = "appendonly.aof"
+
+// New builds a server, replaying the AOF first when persistence is enabled.
+func New(cfg Config) (*Server, error) {
 	st := store.New()
-	return &Server{
+	s := &Server{
 		addr:  cfg.Addr,
 		store: st,
 		disp:  command.NewDispatcher(st, cfg.Password),
 		conns: map[net.Conn]struct{}{},
 	}
+	if cfg.AppendOnly {
+		if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+			st.Close()
+			return nil, err
+		}
+		aof, err := persistence.Open(filepath.Join(cfg.Dir, aofName), cfg.AppendFsync, s.disp.Apply)
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
+		s.aof = aof
+		s.disp.SetAppender(aof)
+	}
+	return s, nil
 }
 
 func (s *Server) ListenAndServe() error {
@@ -93,6 +117,11 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.store.Close()
+	if s.aof != nil {
+		if aerr := s.aof.Close(); err == nil {
+			err = aerr
+		}
+	}
 	return err
 }
 
@@ -118,7 +147,11 @@ func (s *Server) handle(c net.Conn) {
 			}
 			return
 		}
-		s.disp.Dispatch(w, &sess, args)
+		if err := s.disp.Dispatch(w, &sess, args); err != nil {
+			// Unpersisted write: drop the connection without flushing the reply.
+			log.Printf("conn %s: %v", c.RemoteAddr(), err)
+			return
+		}
 		// Flush only once the pipeline is drained: batches replies to pipelined requests.
 		if r.Buffered() == 0 {
 			if err := w.Flush(); err != nil {
