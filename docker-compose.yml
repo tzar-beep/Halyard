@@ -1,0 +1,9 @@
+# Usage: REDIS_PASSWORD=... docker compose up -d --build
+services:
+  redis:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}

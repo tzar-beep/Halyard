@@ -3,6 +3,7 @@ package command
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"strings"
 
@@ -16,10 +17,18 @@ type handler struct {
 }
 
 type Dispatcher struct {
-	store *store.Store
+	store    *store.Store
+	password string // empty disables AUTH
 }
 
-func NewDispatcher(s *store.Store) *Dispatcher { return &Dispatcher{store: s} }
+func NewDispatcher(s *store.Store, password string) *Dispatcher {
+	return &Dispatcher{store: s, password: password}
+}
+
+// Session is per-connection state.
+type Session struct {
+	Authed bool
+}
 
 var table = map[string]handler{
 	"ping": {-1, ping},
@@ -29,11 +38,19 @@ var table = map[string]handler{
 }
 
 // Dispatch executes one command and writes its reply to w.
-func (d *Dispatcher) Dispatch(w *resp.Writer, args [][]byte) {
+func (d *Dispatcher) Dispatch(w *resp.Writer, sess *Session, args [][]byte) {
 	if len(args) == 0 {
 		return
 	}
 	name := strings.ToLower(string(args[0]))
+	if name == "auth" {
+		d.auth(w, sess, args)
+		return
+	}
+	if d.password != "" && !sess.Authed {
+		w.Error("NOAUTH Authentication required.")
+		return
+	}
 	h, ok := table[name]
 	if !ok {
 		w.Error(fmt.Sprintf("ERR unknown command '%s', with args beginning with: %s", args[0], quoteArgs(args[1:])))
@@ -74,6 +91,32 @@ func set(d *Dispatcher, w *resp.Writer, args [][]byte) {
 		return
 	}
 	d.store.Set(string(args[1]), bytes.Clone(args[2]))
+	w.SimpleString("OK")
+}
+
+// AUTH password | AUTH default password
+func (d *Dispatcher) auth(w *resp.Writer, sess *Session, args [][]byte) {
+	var user, pass []byte
+	switch len(args) {
+	case 2:
+		pass = args[1]
+	case 3:
+		user, pass = args[1], args[2]
+	default:
+		w.Error("ERR wrong number of arguments for 'auth' command")
+		return
+	}
+	if d.password == "" {
+		w.Error("ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?")
+		return
+	}
+	userOK := user == nil || string(user) == "default"
+	passOK := subtle.ConstantTimeCompare(pass, []byte(d.password)) == 1
+	if !userOK || !passOK {
+		w.Error("WRONGPASS invalid username-password pair or user is disabled.")
+		return
+	}
+	sess.Authed = true
 	w.SimpleString("OK")
 }
 

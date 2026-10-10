@@ -24,8 +24,17 @@ type Server struct {
 	wg    sync.WaitGroup
 }
 
-func New(addr string) *Server {
-	return &Server{addr: addr, disp: command.NewDispatcher(store.New()), conns: map[net.Conn]struct{}{}}
+type Config struct {
+	Addr     string
+	Password string // empty disables AUTH
+}
+
+func New(cfg Config) *Server {
+	return &Server{
+		addr:  cfg.Addr,
+		disp:  command.NewDispatcher(store.New(), cfg.Password),
+		conns: map[net.Conn]struct{}{},
+	}
 }
 
 func (s *Server) ListenAndServe() error {
@@ -92,6 +101,7 @@ func (s *Server) handle(c net.Conn) {
 		s.wg.Done()
 	}()
 	r, w := resp.NewReader(c), resp.NewWriter(c)
+	var sess command.Session
 	for {
 		args, err := r.ReadCommand()
 		if err != nil {
@@ -104,7 +114,7 @@ func (s *Server) handle(c net.Conn) {
 			}
 			return
 		}
-		s.disp.Dispatch(w, args)
+		s.disp.Dispatch(w, &sess, args)
 		// Flush only once the pipeline is drained: batches replies to pipelined requests.
 		if r.Buffered() == 0 {
 			if err := w.Flush(); err != nil {

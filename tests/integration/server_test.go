@@ -12,13 +12,15 @@ import (
 	"github.com/tzar-beep/redis/internal/server"
 )
 
-func start(t *testing.T) string {
+func start(t *testing.T) string { return startWith(t, server.Config{}) }
+
+func startWith(t *testing.T, cfg server.Config) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := server.New("")
+	s := server.New(cfg)
 	go s.Serve(ln)
 	t.Cleanup(func() { s.Close() })
 	return ln.Addr().String()
@@ -60,6 +62,14 @@ func TestBasicCommands(t *testing.T) {
 	roundtrip(t, c, r, "*1\r\n$3\r\nGET\r\n", "-ERR wrong number of arguments for 'get' command\r\n")
 	roundtrip(t, c, r, "*1\r\n$3\r\nFOO\r\n", "-ERR unknown command 'FOO', with args beginning with: \r\n")
 	roundtrip(t, c, r, "PING\r\n", "+PONG\r\n")
+}
+
+func TestAuth(t *testing.T) {
+	c, r := dial(t, startWith(t, server.Config{Password: "s3cret"}))
+	roundtrip(t, c, r, "*1\r\n$4\r\nPING\r\n", "-NOAUTH Authentication required.\r\n")
+	roundtrip(t, c, r, "*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n", "-WRONGPASS invalid username-password pair or user is disabled.\r\n")
+	roundtrip(t, c, r, "*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n", "+OK\r\n")
+	roundtrip(t, c, r, "*1\r\n$4\r\nPING\r\n", "+PONG\r\n")
 }
 
 func TestPipelining(t *testing.T) {
