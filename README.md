@@ -11,6 +11,28 @@ redis-cli -c -p 6381 SET user:42 alice     # works with the real redis-cli
 redis-cli -c -p 6382 GET user:42           # any node; -c follows MOVED to the leader
 ```
 
+## Screenshots
+
+**Raft playground** — the production `internal/raft` package compiled to WebAssembly, mid-failover: the leader has
+crashed, a candidate is campaigning, and every replica's log is shown by term.
+
+![Raft playground](docs/screenshots/playground.png)
+
+**Live cluster dashboard** — a real 3-node cluster over TCP: replication traffic, failover controls, Raft logs.
+
+![Cluster dashboard](docs/screenshots/dashboard.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/hero.png" alt="Landing page"></td>
+    <td><img src="docs/screenshots/failover.png" alt="Failover timeline"></td>
+  </tr>
+  <tr>
+    <td align="center">Landing page</td>
+    <td align="center">Measured failover</td>
+  </tr>
+</table>
+
 ## Highlights
 
 | | |
