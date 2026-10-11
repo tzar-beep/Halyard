@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css?v=11">
-  <link rel="stylesheet" href="landing.css?v=13">
+  <link rel="stylesheet" href="landing.css?v=14">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <script src="wasm_exec.js"></script>
 </head>
@@ -37,7 +37,7 @@
   </header>
 
   <main>
-    <section class="intro wrap">
+    <section class="intro wrap"><canvas id="hero-bg" aria-hidden="true"></canvas>
       <p class="eyebrow"><span class="dot"></span>Open source · Go · zero dependencies</p>
       <h1>The Redis protocol,<br><span class="dim">replicated with Raft.</span></h1>
       <p class="lede">Halyard speaks RESP, so <code>redis-cli</code> and your existing clients just work. Every write is
@@ -218,6 +218,6 @@ redis-cli -c -h h1 CLUSTER MIGRATE 5000 2   <span class="m"># move a slot while 
   </footer>
 
   <script src="playground.js?v=4"></script>
-  <script src="landing.js?v=11"></script>
+  <script src="landing.js?v=12"></script>
 </body>
 </html>

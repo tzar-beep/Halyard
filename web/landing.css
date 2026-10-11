@@ -235,3 +235,7 @@ pre.code .copy { top: 12px; transform: none; }
   .f-brand { grid-column: 1 / -1; }
   .tl-labels { font-size: 11.5px; }
 }
+
+.intro { position: relative; isolation: isolate; }
+#hero-bg { position: absolute; z-index: -1; top: -60px; left: 50%; width: 100vw; height: calc(100% + 60px); transform: translateX(-50%); pointer-events: none;
+  -webkit-mask-image: radial-gradient(ellipse 70% 75% at 50% 40%, #000 30%, transparent 75%); mask-image: radial-gradient(ellipse 70% 75% at 50% 40%, #000 30%, transparent 75%); }
