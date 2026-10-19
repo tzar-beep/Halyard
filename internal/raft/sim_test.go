@@ -195,12 +195,13 @@ func (s *sim) process(nd *simNode) {
 // Nothing from this Ready was sent or applied.
 func (s *sim) tornWrite(nd *simNode, rd Ready) {
 	k := s.rng.IntN(len(rd.Entries) + 1)
+	snapLost := false
 	if rd.Snapshot != nil {
 		if s.rng.IntN(2) == 0 {
 			nd.disk.Snapshot = rd.Snapshot
 			nd.disk.Entries = nil
 		} else {
-			k = 0 // crashed before the snapshot: nothing after it was written either
+			k, snapLost = 0, true // crashed before the snapshot: nothing after it was written either
 		}
 	}
 	if k > 0 {
@@ -215,7 +216,7 @@ func (s *sim) tornWrite(nd *simNode, rd Ready) {
 			nd.disk.Entries = append(keep, rd.Entries[:k]...)
 		}
 	}
-	if rd.HSChanged && k == len(rd.Entries) && s.rng.IntN(2) == 0 {
+	if rd.HSChanged && !snapLost && k == len(rd.Entries) && s.rng.IntN(2) == 0 {
 		nd.disk.HardState = rd.HardState
 	}
 	// The hard state's commit index can never point past the durable log.

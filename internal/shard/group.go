@@ -316,7 +316,11 @@ func DecodeDump(b []byte) (*store.Object, int64, error) {
 			if len(b) < 8 {
 				return nil, 0, errBadDump
 			}
-			o.ZSet.Add(string(m), math.Float64frombits(binary.BigEndian.Uint64(b)))
+			score := math.Float64frombits(binary.BigEndian.Uint64(b))
+			if math.IsNaN(score) { // Redis never stores NaN scores; they would break ordering
+				return nil, 0, errBadDump
+			}
+			o.ZSet.Add(string(m), score)
 			b = b[8:]
 		}
 	}
